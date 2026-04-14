@@ -2,6 +2,10 @@ import sys
 import io
 import os
 import math
+import copy
+import psutil
+import time
+
 
 from PIL import Image # Asegúrate de importar Image de PIL en tu main.py
 
@@ -387,8 +391,9 @@ class SliderRow(QWidget):
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider.setStyleSheet(f"""
             QSlider::groove:horizontal {{ border: none; background: #18191D; height: 4px; border-radius: 2px; }}
-            QSlider::handle:horizontal {{ background: {COLOR_ACCENT}; border: none; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }}
-            QSlider::handle:horizontal:hover {{ background: {TEXT_MAIN}; transform: scale(1.2); }}
+            QSlider::handle:horizontal {{ background: {COLOR_ACCENT}; border: none; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+            /* 🚀 EL TRUCO: Cambiamos dimensiones reales en vez de usar 'transform' */
+            QSlider::handle:horizontal:hover {{ background: #FFFFFF; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }}
         """)
         
         layout.addWidget(self.slider)
@@ -1316,6 +1321,51 @@ class PremiumTextItem(QGraphicsPathItem):
         # Solo sumamos 2px para que el suavizado de bordes (antialiasing) respire.
         return self.path().boundingRect().adjusted(-2, -2, 2, 2)
 
+class PerformanceMonitor(QLabel):
+    """Overlay tipo Game Engine para medir FPS y RAM en vivo"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # 🚀 Tamaño fijo para que el texto siempre sea visible
+        self.setFixedSize(220, 30) 
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("""
+            background-color: rgba(18, 18, 20, 220); 
+            color: #00FF00; 
+            font-family: 'Consolas', monospace; 
+            font-size: 11px; 
+            font-weight: bold; 
+            border-radius: 6px; 
+            border: 1px solid #2A2B31;
+        """)
+        self.frames = 0
+        self.last_time = time.perf_counter()
+        self.setText("🖥️ Iniciando Motor...")
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_stats)
+        self.timer.start(1000) # Actualizamos cada 1 segundo para mayor estabilidad
+
+    def tick(self):
+        self.frames += 1
+
+    def update_stats(self):
+        now = time.perf_counter()
+        dt = now - self.last_time
+        fps = self.frames / dt if dt > 0 else 0
+        try:
+            process = psutil.Process(os.getpid())
+            ram_mb = process.memory_info().rss / (1024 * 1024)
+            ram_str = f"{ram_mb:.1f} MB"
+        except: ram_str = "-- MB"
+        
+        # Color dinámico: Verde (Pro), Naranja (Alerta), Rojo (Lag)
+        color = "#00FF00" if fps > 50 else "#FFB84D" if fps > 25 else "#FF5C5C"
+        self.setStyleSheet(f"background-color: rgba(18, 18, 20, 220); color: {color}; border-radius: 6px; border: 1px solid #2A2B31; font-family: 'Consolas'; font-weight: bold;")
+        self.setText(f"🖥️ FPS: {int(fps)} | 💾 RAM: {ram_str}")
+        self.frames = 0
+        self.last_time = now
+
 class InteractiveCanvasView(QGraphicsView):
     elemento_seleccionado = pyqtSignal(str)
     lienzo_modificado = pyqtSignal()
@@ -1377,6 +1427,13 @@ class InteractiveCanvasView(QGraphicsView):
         self.hoja_fondo.setPen(QPen(Qt.PenStyle.NoPen))
         self.scene().addItem(self.hoja_fondo)
 
+        self.tecla_s_presionada = False
+        self.tecla_a_presionada = False
+        self.grosor_pluma_actual = 3.0
+
+        self.perf_monitor = PerformanceMonitor(self)
+        self.perf_monitor.show()
+
     def set_tool(self, tool_id):
         """Cambia el comportamiento del ratón según la herramienta activa"""
         self.herramienta_activa = tool_id
@@ -1395,7 +1452,7 @@ class InteractiveCanvasView(QGraphicsView):
         # =======================================================
 
         # 🚀 LA CURA DEL CURSOR FANTASMA: Quitamos la mano de todos los objetos si tienes la pluma
-        cursor_obj = Qt.CursorShape.CrossCursor if tool_id in ['pen', '3d', 'perspective'] else Qt.CursorShape.OpenHandCursor
+        cursor_obj = Qt.CursorShape.CrossCursor if tool_id in ['pen', 'node_edit', '3d', 'perspective'] else Qt.CursorShape.OpenHandCursor
         for item in self.items_ui.values():
             item.setCursor(cursor_obj)
 
@@ -1754,36 +1811,37 @@ class InteractiveCanvasView(QGraphicsView):
                 else:
                     item = self.items_ui[uid]
                     
-                # 1. Recuperamos los puntos relativos limpios
-                from PyQt6.QtCore import QPointF
+                # ==========================================
+                # 🚀 PROCESAMIENTO DEL TRAZO (Tinta Sólida)
+                # ==========================================
                 puntos_relativos = elem.get('puntos', [])
                 pts_relativos_qt = []
                 
                 for p_rel in puntos_relativos:
-                    # Invertimos Y para pasar de PDF a Qt (sin sumar X o Y globales)
-                    pts_relativos_qt.append(QPointF(p_rel[0], -p_rel[1]))
+                    g_pt = p_rel[2] if len(p_rel) > 2 else float(elem.get('borde_grosor', 3.0))
+                    pts_relativos_qt.append((QPointF(p_rel[0], -p_rel[1]), g_pt))
                     
                 # 2. Generamos la curva suave
-                path_suave = self._generar_patron_suave(pts_relativos_qt)
+                path_suave = self._generar_patron_variable(pts_relativos_qt)
                 
-                # 3. 🚀 LA CURA DEL APLASTAMIENTO Y DESFASE:
-                # Mapeamos la curva a través de la matriz. Esto deforma la curva 
-                # matemáticamente pero DEJA INTACTO el grosor de la tinta.
+                # 🚀 LA CURA DE LAS PUNTAS TRANSPARENTES: Fusión Vectorial al Final
+                # Al soltar el ratón y generar el objeto final, sí aplicamos .simplified() 
+                # (la función booleana que borramos antes) para fundir los círculos de tapa.
+                # Como solo se hace una vez al soltar, no causará lag al mover.
+                path_suave = path_suave.simplified() # 🚀 RESTAURADO AL SOLTAR
+                
+                # 3. LA CURA DEL APLASTAMIENTO Y DESFASE:
                 t_final = self._obtener_matriz_acumulada(uid)
                 path_global = t_final.map(path_suave)
                 item.setPath(path_global)
                 
-                # 4. Estilos del trazo (Vectorial puro)
+                # 🚀 LA CURA DEL FANTASMA DEL ANTI-ALIASING: 
+                # Le ponemos un borde de medio píxel del mismo color de la tinta.
+                # Esto sella microscópicamente los recortes que genera la GPU al doblar la curva.
                 color_borde = elem.get('borde_color', '#000000')
-                grosor_borde = float(elem.get('borde_grosor', 3.0))
+                item.setPen(QPen(QColor(color_borde), 0.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                item.setBrush(QBrush(QColor(color_borde)))
                 
-                pen = QPen(QColor(color_borde), grosor_borde, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-                item.setPen(pen)
-                from PyQt6.QtGui import QBrush
-                item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-                
-                # 5. Quitamos la matriz al contenedor para que Qt no aplaste la tinta
-                from PyQt6.QtGui import QTransform
                 item.setTransform(QTransform())
                 item.setOpacity(self._obtener_opacidad_acumulada(uid))
                 
@@ -1917,6 +1975,7 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 LA MAGIA DE LA VELOCIDAD: Hardware Caching (Texturas de GPU)
         es_svg = tipo == 'Foto' and str(elem.get('contenido', '')).lower().endswith('.svg')
         es_texto = tipo == 'Texto'
+        es_trazo = tipo == 'Trazo'
         
         if es_svg or es_texto:
             # Le dice a PyQt que guarde los vectores y TIPOGRAFÍAS como texturas 
@@ -2046,12 +2105,8 @@ class InteractiveCanvasView(QGraphicsView):
 
         herramienta = getattr(self, 'herramienta_activa', 'select')
 
-        # 🚀 RESTRICCIÓN VECTORIAL: Los trazos son 2D puros. Anulamos controles 3D.
-        if elem.get('tipo') == 'Trazo' and herramienta in ['3d', 'perspective']:
-            herramienta = 'select'
-
         # 🚀 LA CURA DE LA VISTA LIMPIA: Si tienes la pluma, NO dibujamos ninguna caja.
-        if herramienta == 'pen':
+        if herramienta in ['pen', 'node_edit']:
             pass 
         elif herramienta not in ['3d', 'perspective']:
             # ==========================================
@@ -2299,7 +2354,7 @@ class InteractiveCanvasView(QGraphicsView):
         # ==========================================
         # 🚀 OVERLAY DE NODOS VECTORIALES (Para Trazos) - Estilo Premium
         # ==========================================
-        if not es_multiple and elem.get('tipo') == 'Trazo' and herramienta in ['select', 'pen']:
+        if not es_multiple and elem.get('tipo') == 'Trazo' and herramienta in ['node_edit', 'pen']:
             self.grupo_nodos = QGraphicsItemGroup()
             self.grupo_nodos.setZValue(999999.5) # Encima de todo
             
@@ -2313,17 +2368,19 @@ class InteractiveCanvasView(QGraphicsView):
                 p_qt = QPointF(p[0], -p[1])
                 p_scene = t_final.map(p_qt)
                 
-                # Usamos círculos en lugar de cuadrados para un look más orgánico
                 if i == 0 or i == len(pts_rel) - 1:
-                    # Nodos Extremos: Un poco más grandes, borde naranja brillante (Indican que el imán funciona)
                     nodo = QGraphicsEllipseItem(p_scene.x() - (ns*1.4)/2, p_scene.y() - (ns*1.4)/2, ns*1.4, ns*1.4)
                     nodo.setBrush(QBrush(QColor("#FFFFFF")))
                     nodo.setPen(QPen(QColor(COLOR_ACCENT), 1.5 / self.zoom))
                 else:
-                    # Nodos Internos: Pequeños, borde gris sutil (Solo referencia visual)
                     nodo = QGraphicsEllipseItem(p_scene.x() - ns/2, p_scene.y() - ns/2, ns, ns)
                     nodo.setBrush(QBrush(QColor("#FFFFFF")))
                     nodo.setPen(QPen(QColor("#6A6D75"), 1.0 / self.zoom))
+                
+                # 🚀 LA MAGIA: Le asignamos un ID y cursor a cada nodo
+                nodo.setData(0, f"nodo_{i}") 
+                if herramienta == 'node_edit':
+                    nodo.setCursor(Qt.CursorShape.SizeAllCursor)
                 
                 self.grupo_nodos.addToGroup(nodo)
                 
@@ -2703,7 +2760,7 @@ class InteractiveCanvasView(QGraphicsView):
             # =======================================================
             herramienta = getattr(self, 'herramienta_activa', 'select')
             if herramienta == 'pen':
-                from PyQt6.QtGui import QPainterPath, QPen, QColor
+                from PyQt6.QtGui import QPainterPath, QBrush, QColor, QPen
                 from PyQt6.QtCore import QPointF, QLineF
                 
                 uid_continuar = None
@@ -2711,65 +2768,58 @@ class InteractiveCanvasView(QGraphicsView):
                 puntos_heredados_scene = []
                 invertir_trazo = False
                 
-                # 🚀 1. EL IMÁN: ¿Hicimos clic cerca de un nodo blanco?
+                # IMÁN MAGNÉTICO
                 if self.uid_activo and self.motor.elementos.get(self.uid_activo, {}).get('tipo') == 'Trazo':
                     elem = self.motor.elementos[self.uid_activo]
                     t_final = self._obtener_matriz_acumulada(self.uid_activo)
                     pts_rel = elem.get('puntos', [])
-                    
                     if pts_rel:
                         p_inicio_scene = t_final.map(QPointF(pts_rel[0][0], -pts_rel[0][1]))
                         p_fin_scene = t_final.map(QPointF(pts_rel[-1][0], -pts_rel[-1][1]))
+                        umbral = 15.0 / self.zoom
                         
-                        umbral = 15.0 / self.zoom # Rango de atracción del imán magnético
-                        
-                        if QLineF(pos_scene, p_fin_scene).length() <= umbral:
-                            uid_continuar = self.uid_activo
+                        if QLineF(pos_scene, p_fin_scene).length() <= umbral: uid_continuar = self.uid_activo
                         elif QLineF(pos_scene, p_inicio_scene).length() <= umbral:
-                            uid_continuar = self.uid_activo
-                            invertir_trazo = True # Dibujó al revés, volteamos la línea
+                            uid_continuar = self.uid_activo; invertir_trazo = True
 
-                # 🚀 2. PREPARACIÓN DE MEMORIA
+                # MEMORIA DE GROSOR
                 if uid_continuar:
-                    # HORNEAMOS LA LÍNEA VIEJA para continuarla en pantalla sin cortes
                     elem = self.motor.elementos[uid_continuar]
                     pts_rel = elem.get('puntos', [])
                     t_final = self._obtener_matriz_acumulada(uid_continuar)
-                    
                     for p in pts_rel:
                         p_scene = t_final.map(QPointF(p[0], -p[1]))
                         p_pdf_x, p_pdf_y = self.motor.ui_a_pdf(p_scene.x(), p_scene.y(), 1.0)
                         
-                        puntos_heredados_scene.append(p_scene)
-                        puntos_heredados_pdf.append(QPointF(p_pdf_x, p_pdf_y))
+                        # Rescatamos el grosor individual de cada punto guardado
+                        g_pt = p[2] if len(p) > 2 else float(elem.get('borde_grosor', 3.0))
+                        puntos_heredados_scene.append((p_scene, g_pt))
+                        puntos_heredados_pdf.append((QPointF(p_pdf_x, p_pdf_y), g_pt))
                         
                     if invertir_trazo:
-                        puntos_heredados_scene.reverse()
-                        puntos_heredados_pdf.reverse()
+                        puntos_heredados_scene.reverse(); puntos_heredados_pdf.reverse()
                         
                     self.puntos_trazo = puntos_heredados_pdf
                     self.puntos_visuales = puntos_heredados_scene
                     self.uid_en_edicion_trazo = uid_continuar
-                    
-                    # Ocultamos la línea original temporalmente mientras añadimos tinta
-                    if uid_continuar in self.items_ui:
-                        self.items_ui[uid_continuar].setVisible(False)
+                    # El grosor arranca en el grosor del último punto del imán
+                    self.grosor_pluma_actual = puntos_heredados_pdf[-1][1]
+                    if uid_continuar in self.items_ui: self.items_ui[uid_continuar].setVisible(False)
                 else:
-                    self.puntos_trazo = [QPointF(pdf_x, pdf_y)] 
-                    self.puntos_visuales = [pos_scene]          
+                    self.grosor_pluma_actual = 5.0 # Grosor estándar
+                    self.puntos_trazo = [(QPointF(pdf_x, pdf_y), self.grosor_pluma_actual)] 
+                    self.puntos_visuales = [(pos_scene, self.grosor_pluma_actual)]          
                     self.uid_en_edicion_trazo = None
 
-                # 🚀 3. EL TRAZO TEMPORAL
                 self.item_trazo_temp = QGraphicsPathItem()
-                color_pen = QColor("#FE5934") 
-                self.item_trazo_temp.setPen(QPen(color_pen, 4.0 / self.zoom, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                # 🚀 LA MAGIA: El trazo en vivo ya no es una "línea" (Pen), ahora es una "forma rellena" (Brush)
+                self.item_trazo_temp.setPen(QPen(Qt.PenStyle.NoPen))
+                self.item_trazo_temp.setBrush(QBrush(QColor("#FE5934")))
                 self.item_trazo_temp.setZValue(999999)
                 self.scene().addItem(self.item_trazo_temp)
                 
-                # Si es continuación, dibujamos la base de inmediato para que la veas
                 if uid_continuar:
-                    path_suave = self._generar_patron_suave(self.puntos_visuales)
-                    self.item_trazo_temp.setPath(path_suave)
+                    self.item_trazo_temp.setPath(self._generar_patron_variable(self.puntos_visuales))
                 
                 self.modo_accion = "DRAWING"
                 return
@@ -2778,8 +2828,21 @@ class InteractiveCanvasView(QGraphicsView):
             # A. ¿Hicimos clic en un control de transformación (caja azul)?
             item = self.scene().itemAt(pos_scene, self.viewportTransform())
             if item and item.data(0):
-                clave = item.data(0)
+                clave = str(item.data(0))
                 es_multiple = len(self.uids_seleccionados) > 1
+                
+                if clave.startswith("nodo_"):
+                    self.motor.registrar_punto_historial(self.uids_seleccionados)
+                    self.modo_accion = "MOVE_NODE"
+                    self.nodo_activo_idx = int(clave.split("_")[1])
+                    self.start_pdf_x, self.start_pdf_y = pdf_x, pdf_y
+                    self.start_puntos = copy.deepcopy(self.motor.elementos[self.uid_activo]['puntos'])
+                    
+                    # 🚀 LA CURA DEL TIEMPO REAL: Apagamos el caché mientras editamos
+                    item_real = self.items_ui[self.uid_activo]
+                    item_real.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+                    
+                    return
                 
                 if clave == "rot":
                     self.motor.registrar_punto_historial(self.uids_seleccionados)
@@ -2850,7 +2913,6 @@ class InteractiveCanvasView(QGraphicsView):
                     self.start_pdf_x, self.start_pdf_y = pdf_x, pdf_y
                     
                     elem = self.motor.elementos[self.uid_activo]
-                    import copy
                     self.start_persp = copy.deepcopy(elem.get('perspectiva', [[0,0], [0,0], [0,0], [0,0]]))
                     
                     # Ocultamos la caja cyan para limpiar la vista
@@ -3354,22 +3416,24 @@ class InteractiveCanvasView(QGraphicsView):
                 self.last_mouse_y = pdf_y
 
         # =======================================================
-        # 🚀 2.5 DIBUJO EN VIVO MAGISTRAL
+        # 🚀 2.5 DIBUJO EN VIVO MAGISTRAL (Con sensibilidad de teclas)
         # =======================================================
         if self.modo_accion == "DRAWING":
             pdf_x, pdf_y = self.get_pdf_coords(event)
             
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                # Si presionas Shift, borramos el historial curvo y unimos el inicio con el ratón
-                self.puntos_trazo = [self.puntos_trazo[0], QPointF(pdf_x, pdf_y)] 
-                self.puntos_visuales = [self.puntos_visuales[0], pos_scene]          
-            else:
-                # Dibujo libre normal
-                self.puntos_trazo.append(QPointF(pdf_x, pdf_y)) 
-                self.puntos_visuales.append(pos_scene)          
+            # 🚀 DINÁMICA S/A (Crecer / Encoger suavemente)
+            if self.tecla_s_presionada: self.grosor_pluma_actual = min(60.0, self.grosor_pluma_actual + 1.0)
+            if self.tecla_a_presionada: self.grosor_pluma_actual = max(1.0, self.grosor_pluma_actual - 1.0)
             
-            # Renderizado en vivo con curvas de Bézier
-            path_suave = self._generar_patron_suave(self.puntos_visuales)
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.puntos_trazo = [self.puntos_trazo[0], (QPointF(pdf_x, pdf_y), self.grosor_pluma_actual)] 
+                self.puntos_visuales = [self.puntos_visuales[0], (pos_scene, self.grosor_pluma_actual)]          
+            else:
+                self.puntos_trazo.append((QPointF(pdf_x, pdf_y), self.grosor_pluma_actual)) 
+                self.puntos_visuales.append((pos_scene, self.grosor_pluma_actual))          
+            
+            # Renderizado en vivo con curvas de Bézier (Limpiamos los argumentos)
+            path_suave = self._generar_patron_variable(self.puntos_visuales)
             self.item_trazo_temp.setPath(path_suave)
             return
 
@@ -3401,6 +3465,53 @@ class InteractiveCanvasView(QGraphicsView):
 
                 self.last_mouse_x = pdf_x
                 self.last_mouse_y = pdf_y
+
+            # =======================================================
+            # 🚀 TRANSFORMAR ELEMENTOS SELECCIONADOS (Tiempo Real Nodos)
+            # =======================================================
+            elif self.modo_accion == "MOVE_NODE":
+                dx_global = pdf_x - self.start_pdf_x
+                dy_global = pdf_y - self.start_pdf_y
+                
+                # Deshacemos la rotación para que el ratón no se invierta si la curva está rotada
+                angulo = float(self.motor.elementos[self.uid_activo].get('rotacion', 0.0))
+                if angulo != 0.0:
+                    import math
+                    rad = math.radians(angulo)
+                    dx = (dx_global * math.cos(rad)) + (dy_global * math.sin(rad))
+                    dy = -(dx_global * math.sin(rad)) + (dy_global * math.cos(rad))
+                else:
+                    dx, dy = dx_global, dy_global
+                    
+                idx = self.nodo_activo_idx
+                pt_orig = self.start_puntos[idx]
+                
+                # 🚀 1. Actualizamos el punto exacto en el motor
+                self.motor.elementos[self.uid_activo]['puntos'][idx][0] = round(pt_orig[0] + dx, 2)
+                self.motor.elementos[self.uid_activo]['puntos'][idx][1] = round(pt_orig[1] + dy, 2)
+                
+                # 🚀 2. REGENRAMOS EL PATH VISUAL DEL ITEM REAL (Tiempo Real)
+                item_real = self.items_ui[self.uid_activo]
+                puntos_relativos = self.motor.elementos[self.uid_activo].get('puntos', [])
+                pts_relativos_qt = []
+                for p_rel in puntos_relativos:
+                    g_pt = p_rel[2] if len(p_rel) > 2 else float(self.motor.elementos[self.uid_activo].get('borde_grosor', 3.0))
+                    pts_relativos_qt.append((QPointF(p_rel[0], -p_rel[1]), g_pt))
+                
+                # Generamos el path suave (ribbon sin .simplified() para velocidad en vivo)
+                path_suave = self._generar_patron_variable(pts_relativos_qt)
+                
+                # Mapeamos la transformación global
+                t_final = self._obtener_matriz_acumulada(self.uid_activo)
+                path_global = t_final.map(path_suave)
+                
+                # 🚀 3. Asignamos el nuevo path al item real (invalidando el renderizado viejo)
+                item_real.setPath(path_global)
+                
+                # 🚀 4. Regeneramos los nodos visuales
+                self.dibujar_controles_seleccion()
+                
+                return
 
             elif self.modo_accion == "RESIZE":
                 mods = event.modifiers()
@@ -3546,6 +3657,8 @@ class InteractiveCanvasView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def paintEvent(self, event):
+        if hasattr(self, 'perf_monitor'):
+            self.perf_monitor.tick()
         # 1. Dejamos que PyQt dibuje el lienzo, las fotos, los textos y la caja azul
         super().paintEvent(event)
         
@@ -3627,6 +3740,13 @@ class InteractiveCanvasView(QGraphicsView):
             
             painter.end()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 🚀 Lo ponemos un poco más adentro (20px) para que no choque con los bordes
+        if hasattr(self, 'perf_monitor'):
+            self.perf_monitor.move(20, 20)
+            self.perf_monitor.raise_() # Nos aseguramos que esté por encima de todo
+
     def mouseReleaseEvent(self, event):
 
         if not self.modo_accion:
@@ -3647,19 +3767,22 @@ class InteractiveCanvasView(QGraphicsView):
             
             tolerancia = 0.2 + (valor_suavizado * 0.3)
             
-            puntos_finales = self._simplificar_puntos(self.puntos_trazo, epsilon=tolerancia)
+            # Usamos el simplificador variable
+            puntos_finales = self._simplificar_puntos_variable(self.puntos_trazo, epsilon=tolerancia)
             
             if len(puntos_finales) >= 2:
-                min_x = min(p.x() for p in puntos_finales)
-                max_x = max(p.x() for p in puntos_finales)
-                min_y = min(p.y() for p in puntos_finales)
-                max_y = max(p.y() for p in puntos_finales)
+                # Ahora p es una tupla: (QPointF, grosor)
+                min_x = min(p[0].x() for p in puntos_finales)
+                max_x = max(p[0].x() for p in puntos_finales)
+                min_y = min(p[0].y() for p in puntos_finales)
+                max_y = max(p[0].y() for p in puntos_finales)
                 
                 w = max(max_x - min_x, 1.0)
                 h = max(max_y - min_y, 1.0)
                 cx, cy = min_x + w / 2.0, min_y + h / 2.0
                 
-                pts_relativos = [[round(p.x() - cx, 2), round(p.y() - cy, 2)] for p in puntos_finales]
+                # 🚀 GUARDAMOS 3 DATOS EN LA BASE DE DATOS: [x, y, grosor]
+                pts_relativos = [[round(p[0].x() - cx, 2), round(p[0].y() - cy, 2), round(p[1], 2)] for p in puntos_finales]
                 
                 # ==========================================
                 # 🚀 LA MAGIA DE LA FUSIÓN: Sobreescribimos o creamos
@@ -3710,38 +3833,78 @@ class InteractiveCanvasView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton:
             
-            # 🚀 1. SI ESTÁBAMOS TRANSFORMANDO (Mover, Escalar, Rotar, Inclinación 3D)
-            if self.modo_accion in ["MOVE", "RESIZE", "ROTATE", "SHEAR", "ROTATE_3D"]:
+            # 🚀 1. SI ESTÁBAMOS TRANSFORMANDO (Mover, Escalar, Rotar, 3D o EDITAR NODOS)
+            if self.modo_accion in ["MOVE", "RESIZE", "ROTATE", "SHEAR", "ROTATE_3D", "MOVE_NODE"]:
                     
                 accion_anterior = self.modo_accion
                 self.modo_accion = None # Apagamos la acción actual
                 
-                # 🧹 Limpiamos la memoria de la caja visual congelada
+                # ==========================================================
+                # 🚀 AUTO-AJUSTE DEL BOUNDING BOX (Lo que añadimos para que no se corte la forma)
+                # ==========================================================
+                if accion_anterior == "MOVE_NODE" and self.uid_activo:
+                    elem = self.motor.elementos[self.uid_activo]
+                    puntos = elem.get('puntos', [])
+                    if puntos:
+                        min_x = min(p[0] for p in puntos)
+                        max_x = max(p[0] for p in puntos)
+                        min_y = min(p[1] for p in puntos)
+                        max_y = max(p[1] for p in puntos)
+                        
+                        w_nuevo = max(max_x - min_x, 1.0)
+                        h_nuevo = max(max_y - min_y, 1.0)
+                        cx_rel = min_x + w_nuevo / 2.0
+                        cy_rel = min_y + h_nuevo / 2.0
+                        
+                        for p in puntos:
+                            p[0] = round(p[0] - cx_rel, 2)
+                            p[1] = round(p[1] - cy_rel, 2)
+                            
+                        angulo = float(elem.get('rotacion', 0.0))
+                        import math
+                        rad = math.radians(angulo)
+                        dx_glob = (cx_rel * math.cos(rad)) - (cy_rel * math.sin(rad))
+                        dy_glob = (cx_rel * math.sin(rad)) + (cy_rel * math.cos(rad))
+                            
+                        elem['w'] = w_nuevo
+                        elem['h'] = h_nuevo
+                        elem['x'] = round(elem['x'] + dx_glob, 2)
+                        elem['y'] = round(elem['y'] + dy_glob, 2)
+                        elem['base_w'] = w_nuevo
+                        elem['base_h'] = h_nuevo
+
+                # 🧹 Limpiamos la memoria de la caja visual múltiple
                 if hasattr(self, 'caja_multiple_fija'): del self.caja_multiple_fija
                 if hasattr(self, 'angulo_multiple_fijo'): del self.angulo_multiple_fijo
                 
-                # 🚀 Sincronizamos para que la UI se actualice con la matemática final
-                self.sincronizar_con_motor()
+                # ==========================================================
+                # 🚀 AQUÍ VA LO NUEVO: LA CURA DE LAS PUNTAS Y EL CACHÉ
+                # ==========================================================
+                # Le decimos a la GPU: "Ya terminamos de mover el nodo, hornea este vector como una textura súper rápida".
+                if self.uid_activo and self.uid_activo in self.items_ui:
+                    item_real = self.items_ui[self.uid_activo]
+                    item_real.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                
+                self.motor.registrar_punto_historial()
+                
+                # 🚀 Sincronizamos (Aquí se aplica el .simplified() que funde las puntas)
+                self.sincronizar_con_motor([self.uid_activo])
                 self.dibujar_controles_seleccion()
                 
                 # Avisamos que hubo cambios para el sistema de guardado
                 self.lienzo_modificado.emit()
-
                 uid_emit = self.uid_activo if self.uid_activo else ""
                 self.elemento_seleccionado.emit(uid_emit)
                 
-                # =======================================================
-                # 🚀 LÓGICA DE EDICIÓN: Si diste clic a un texto, tenías la herramienta "T" y NO arrastraste
-                # =======================================================
+                # Lógica para abrir el editor de texto si diste clic en un texto
                 if accion_anterior == "MOVE" and not getattr(self, 'hubo_arrastre', False):
                     if getattr(self, 'herramienta_activa', 'select') == 'text' and self.uid_activo:
-                        elem = self.motor.elementos.get(self.uid_activo, {})
-                        if elem.get('tipo') == 'Texto':
+                        elem_t = self.motor.elementos.get(self.uid_activo, {})
+                        if elem_t.get('tipo') == 'Texto':
                             if hasattr(self.parent_panel.main_canvas, 'toolbar'):
                                 self.parent_panel.main_canvas.toolbar._set_initial_tool("select")
                             QTimer.singleShot(50, lambda: self.abrir_editor_texto(self.uid_activo))
                             return
-                # =======================================================
                 
                 super().mouseReleaseEvent(event)
                 return
@@ -3842,6 +4005,9 @@ class InteractiveCanvasView(QGraphicsView):
 
     def keyPressEvent(self, event):
         """Atajos de Teclado Premium: Paneo, Copiar, Pegar, Duplicar, Deshacer, Rehacer y Eliminar"""
+
+        if event.key() == Qt.Key.Key_S: self.tecla_s_presionada = True
+        if event.key() == Qt.Key.Key_A: self.tecla_a_presionada = True
         
         # 🚀 0. PANEO NATIVO (Espacio) - Motor C++
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and not getattr(self, 'editor_flotante', None):
@@ -3867,6 +4033,9 @@ class InteractiveCanvasView(QGraphicsView):
                 if hasattr(self.parent_panel, 'main_canvas'): self.parent_panel.main_canvas.toolbar._set_initial_tool("select")
                 event.accept()
                 return
+            elif event.key() == Qt.Key.Key_N: # 🚀 NUEVO ATAJO
+                if hasattr(self.parent_panel, 'main_canvas'): self.parent_panel.main_canvas.toolbar._set_initial_tool("node_edit")
+                event.accept(); return
             elif event.key() == Qt.Key.Key_H:
                 if hasattr(self.parent_panel, 'main_canvas'): self.parent_panel.main_canvas.toolbar._set_initial_tool("hand")
                 event.accept()
@@ -4144,6 +4313,9 @@ class InteractiveCanvasView(QGraphicsView):
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_S: self.tecla_s_presionada = False
+        if event.key() == Qt.Key.Key_A: self.tecla_a_presionada = False
+        
         # 🚀 SOLUCIÓN AL BUG DEL ESPACIO (PANNING)
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             # Le preguntamos a nuestro propio lienzo qué herramienta está activa
@@ -4165,72 +4337,204 @@ class InteractiveCanvasView(QGraphicsView):
         super().keyReleaseEvent(event) 
 
     # =======================================================
-    # 🚀 MOTOR DE SUAVIZADO Y CURVAS MAGISTRAL
+    # 🚀 MOTOR DE TINTA DINÁMICA (GROSOR VARIABLE)
     # =======================================================
-    def _simplificar_puntos(self, puntos, epsilon=1.0):
-        """Simplifica la lista de puntos usando el algoritmo Ramer-Douglas-Peucker
-        para reducir datos innecesarios sin perder la forma esencial."""
+    def _simplificar_puntos_variable(self, puntos_w, epsilon=1.0):
+        """Simplifica la curva pero ahora respeta el grosor (x, y, grosor)"""
         from PyQt6.QtCore import QLineF
-        
-        if len(puntos) < 3:
-            return puntos
+        if len(puntos_w) < 3: return puntos_w
 
-        def d_espacio(p, a, b):
+        def d_espacio(p_w, a_w, b_w):
+            p, a, b = p_w[0], a_w[0], b_w[0]
             if a == b: return QLineF(p, a).length()
-            # Distancia de punto a línea
-            return abs((b.x() - a.x()) * (a.y() - p.y()) - (a.x() - p.x()) * (b.y() - a.y())) / \
-                   ((b.x() - a.x())**2 + (b.y() - a.y())**2)**0.5
+            dist = abs((b.x() - a.x()) * (a.y() - p.y()) - (a.x() - p.x()) * (b.y() - a.y()))
+            norma = ((b.x() - a.x())**2 + (b.y() - a.y())**2)**0.5
+            return dist / norma if norma > 0 else 0
 
-        dmax = 0.0
-        index = 0
-        end = len(puntos) - 1
+        dmax, index, end = 0.0, 0, len(puntos_w) - 1
         for i in range(1, end):
-            d = d_espacio(puntos[i], puntos[0], puntos[end])
-            if d > dmax:
-                index = i
-                dmax = d
+            d = d_espacio(puntos_w[i], puntos_w[0], puntos_w[end])
+            if d > dmax: index, dmax = i, d
 
         if dmax > epsilon:
-            rec1 = self._simplificar_puntos(puntos[:index+1], epsilon)
-            rec2 = self._simplificar_puntos(puntos[index:], epsilon)
+            rec1 = self._simplificar_puntos_variable(puntos_w[:index+1], epsilon)
+            rec2 = self._simplificar_puntos_variable(puntos_w[index:], epsilon)
             return rec1[:-1] + rec2
         else:
-            return [puntos[0], puntos[end]]
+            return [puntos_w[0], puntos_w[end]]
 
-    def _generar_patron_suave(self, puntos):
-        """Genera un QPainterPath perfectamente suave usando interpolación cuadrática 
-        de Bézier entre los puntos medios de los segmentos."""
-        from PyQt6.QtGui import QPainterPath
+    def _generar_patron_variable(self, puntos_con_grosor):
+        """Convierte la ruta en Forma 2D usando nuestro propio Teselador Paramétrico.
+           Miter Robusto (Anti-Spike), Cúpulas perfectas y Rendimiento Máximo."""
+        from PyQt6.QtGui import QPainterPath, QPolygonF
+        from PyQt6.QtCore import QPointF, Qt
+        import math
         
-        path = QPainterPath()
-        if len(puntos) < 2:
-            return path
-            
-        path.moveTo(puntos[0])
+        path_final = QPainterPath()
+        path_final.setFillRule(Qt.FillRule.WindingFill) 
         
-        if len(puntos) == 2:
-            path.lineTo(puntos[1])
-            return path
+        if len(puntos_con_grosor) < 2:
+            if puntos_con_grosor:
+                pt, w = puntos_con_grosor[0]
+                path_final.addEllipse(pt.x() - w/2, pt.y() - w/2, w, w)
+            return path_final
+
+        # =======================================================
+        # 🚀 1. MUESTREO MATEMÁTICO DE PRECISIÓN ABSOLUTA
+        # =======================================================
+        puntos_finos = [puntos_con_grosor[0]] 
+        
+        for i in range(1, len(puntos_con_grosor) - 1):
+            p0, w0 = puntos_finos[-1] 
+            p1, w1 = puntos_con_grosor[i] 
+            p2_orig, w2_orig = puntos_con_grosor[i+1]
+
+            mid_x = (p1.x() + p2_orig.x()) / 2.0
+            mid_y = (p1.y() + p2_orig.y()) / 2.0
+            mid_w = (w1 + w2_orig) / 2.0
+            p2 = QPointF(mid_x, mid_y)
+            w2 = mid_w
+
+            d1 = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
+            d2 = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+            d3 = math.hypot(p2.x() - p0.x(), p2.y() - p0.y())
             
-        # Algoritmo de suavizado magistral: Conectar puntos medios con curvas
-        for i in range(1, len(puntos) - 1):
-            p_actual = puntos[i]
-            p_siguiente = puntos[i+1]
+            longitud_curva = (d1 + d2 + d3) / 2.0
+            pasos = max(5, min(int(longitud_curva / 3.0), 100)) 
+
+            for j in range(1, pasos + 1):
+                t = j / float(pasos)
+                mt = 1.0 - t
+                x = (mt * mt * p0.x()) + (2 * mt * t * p1.x()) + (t * t * p2.x())
+                y = (mt * mt * p0.y()) + (2 * mt * t * p1.y()) + (t * t * p2.y())
+                w = (mt * mt * w0) + (2 * mt * t * w1) + (t * t * w2)
+                puntos_finos.append((QPointF(x, y), w))
+
+        p_ultimo, w_ultimo = puntos_finos[-1]
+        p_final_real, w_final_real = puntos_con_grosor[-1]
+        dist_fin = math.hypot(p_final_real.x() - p_ultimo.x(), p_final_real.y() - p_ultimo.y())
+        pasos_fin = max(2, min(int(dist_fin / 3.0), 30))
+
+        for j in range(1, pasos_fin + 1):
+            t = j / float(pasos_fin)
+            x = p_ultimo.x() + (p_final_real.x() - p_ultimo.x()) * t
+            y = p_ultimo.y() + (p_final_real.y() - p_ultimo.y()) * t
+            w = w_ultimo + (w_final_real - w_ultimo) * t
+            puntos_finos.append((QPointF(x, y), w))
+
+        # =======================================================
+        # 🚀 2. EXTRUSIÓN MATEMÁTICA ROBUSTA (Cero Picos Opuestos)
+        # =======================================================
+        borde_izq = []
+        borde_der = []
+
+        total = len(puntos_finos)
+        for i in range(total):
+            pt, w = puntos_finos[i]
+
+            if i == 0:
+                sig = puntos_finos[1][0]
+                dx, dy = sig.x() - pt.x(), sig.y() - pt.y()
+                l = math.hypot(dx, dy)
+                vx, vy = (dx/l, dy/l) if l > 0 else (1, 0)
+                nx, ny = -vy, vx
+            elif i == total - 1:
+                ant = puntos_finos[i-1][0]
+                dx, dy = pt.x() - ant.x(), pt.y() - ant.y()
+                l = math.hypot(dx, dy)
+                vx, vy = (dx/l, dy/l) if l > 0 else (1, 0)
+                nx, ny = -vy, vx
+            else:
+                ant = puntos_finos[i-1][0]
+                sig = puntos_finos[i+1][0]
+                
+                dx1, dy1 = pt.x() - ant.x(), pt.y() - ant.y()
+                l1 = math.hypot(dx1, dy1)
+                vx1, vy1 = (dx1/l1, dy1/l1) if l1 > 0 else (1, 0)
+                
+                dx2, dy2 = sig.x() - pt.x(), sig.y() - pt.y()
+                l2 = math.hypot(dx2, dy2)
+                vx2, vy2 = (dx2/l2, dy2/l2) if l2 > 0 else (1, 0)
+
+                # 🚀 LA CURA DEL PICO FANTASMA: Normales Promediadas
+                # Calculamos la normal pura de cada segmento independiente
+                n1x, n1y = -vy1, vx1
+                n2x, n2y = -vy2, vx2
+                
+                # Promediamos ambas normales (Bisectriz perfecta e infalible)
+                nx = (n1x + n2x) / 2.0
+                ny = (n1y + n2y) / 2.0
+                
+                l_sq = nx*nx + ny*ny
+                
+                # Si la curva da una vuelta de 180° extrema, l_sq se acerca a 0.
+                if l_sq > 0.01:
+                    # Aplicar la expansión del Miter (Grosor)
+                    nx /= l_sq
+                    ny /= l_sq
+                    
+                    # Limitador de picos inquebrantable (Max 2.5x el grosor original)
+                    miter_len = 1.0 / math.sqrt(l_sq)
+                    if miter_len > 2.5:
+                        nx = nx * (2.5 / miter_len)
+                        ny = ny * (2.5 / miter_len)
+                else:
+                    # En una vuelta de horquilla extrema, simplemente cerramos el ángulo a mano
+                    nx, ny = -vy1, vx1
+
+            r = w / 2.0
+            borde_izq.append(QPointF(pt.x() + nx * r, pt.y() + ny * r))
+            borde_der.append(QPointF(pt.x() - nx * r, pt.y() - ny * r))
+
+        # =======================================================
+        # 🚀 3. CÚPULAS TRIGONOMÉTRICAS DE ALTA PRECISIÓN
+        # =======================================================
+        def generar_tapa(pt_centro, radio, es_inicio):
+            arco = []
+            pasos = max(8, int(radio * 0.8))
             
-            # Calculamos el punto medio exacto del segmento actual al siguiente
-            mid_x = (p_actual.x() + p_siguiente.x()) / 2
-            mid_y = (p_actual.y() + p_siguiente.y()) / 2
-            punto_medio = QPointF(mid_x, mid_y)
-            
-            # Creamos una curva cuadrática de Bézier:
-            # Control: El punto actual (p_actual)
-            # Fin: El punto medio (punto_medio)
-            # Esto obliga a la curva a pasar 'cerca' de p_actual pero sin picos.
-            path.quadTo(p_actual, punto_medio)
-            
-        # Conectamos con una línea recta el último tramo al punto final
-        path.lineTo(puntos[-1])
-        return path
+            if es_inicio:
+                sig = puntos_finos[1][0]
+                dx, dy = sig.x() - pt_centro.x(), sig.y() - pt_centro.y()
+                ang_tangente = math.atan2(dy, dx)
+                
+                # 🚀 LA CURA DEL "PAC-MAN": Empezar en +pi/2 para ir por DETRÁS de la línea
+                ang_start = ang_tangente + (math.pi / 2.0) 
+                ang_sweep = math.pi 
+            else:
+                ant = puntos_finos[-2][0]
+                dx, dy = pt_centro.x() - ant.x(), pt_centro.y() - ant.y()
+                ang_tangente = math.atan2(dy, dx)
+                
+                # Para el final, empezamos en -pi/2 y vamos por el FRENTE
+                ang_start = ang_tangente - (math.pi / 2.0) 
+                ang_sweep = math.pi 
+
+            for j in range(pasos + 1):
+                t = j / float(pasos)
+                ang = ang_start + (ang_sweep * t)
+                arco.append(QPointF(pt_centro.x() + radio * math.cos(ang), pt_centro.y() + radio * math.sin(ang)))
+            return arco
+
+        # =======================================================
+        # 🚀 4. ENSAMBLAJE FINAL DEL POLÍGONO MAESTRO
+        # =======================================================
+        poly_maestro = borde_izq[:]
+        
+        # Tapamos la punta final
+        pt_fin, w_fin = puntos_finos[-1]
+        poly_maestro.extend(generar_tapa(pt_fin, w_fin / 2.0, es_inicio=False))
+        
+        # Volvemos por el borde derecho
+        poly_maestro.extend(borde_der[::-1])
+        
+        # Tapamos el inicio
+        pt_ini, w_ini = puntos_finos[0]
+        poly_maestro.extend(generar_tapa(pt_ini, w_ini / 2.0, es_inicio=True))
+
+        path_final.addPolygon(QPolygonF(poly_maestro))
+        
+        return path_final
 
 class DocumentTab(QWidget):
     """Una pestaña independiente que contiene su propio Motor y su propio Lienzo"""
@@ -4295,6 +4599,7 @@ class FloatingToolBar(QFrame):
 
         self.tools = [
             ("select", "fa5s.mouse-pointer", "Selección (V)"),
+            ("node_edit", "fa5s.project-diagram", "Editar Nodos (N)"),
             ("hand", "fa5s.hand-paper", "Mano (H)"),
             ("text", "fa5s.font", "Texto (T)"),
             ("eyedropper", "fa5s.eye-dropper", "Cuentagotas (I)"),
