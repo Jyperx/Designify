@@ -3,22 +3,14 @@ import io
 import os
 import math
 import copy
+import platform
 import psutil
 import time
+from PIL import Image
 
-
-from PIL import Image # Asegúrate de importar Image de PIL en tu main.py
-
-# =========================================================
-# 🚀 DESBLOQUEO DE LÍMITES PARA SOFTWARE PROFESIONAL (HD / 4K / 8K)
-# =========================================================
-# 1. Quitar el límite de 89 Megapíxeles de Python (Permite cargar gigantografías)
 Image.MAX_IMAGE_PIXELS = None 
-
-# 2. Quitar el límite de 256 MB de RAM por imagen de PyQt (Permite renders pesados)
 from PyQt6.QtGui import QImageReader
-QImageReader.setAllocationLimit(2048) # Subimos el límite a 2048 MB (2 Gigabytes) por imagen
-# =========================================================
+QImageReader.setAllocationLimit(2048)
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QLabel, QPushButton, QLineEdit, QFrame, QGraphicsDropShadowEffect, 
@@ -27,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
                              QSlider, QSizePolicy, QTreeWidget, QTreeWidgetItem, QGraphicsPixmapItem, QTreeWidgetItemIterator,
                              QGraphicsPathItem, QGraphicsTextItem, QGraphicsSimpleTextItem, QGraphicsItem, QComboBox, QListWidget, QListWidgetItem, QAbstractItemView,
                              QFileDialog, QMenu, QWidgetAction, QDialog, QMessageBox, QTabBar, QSizeGrip, QStackedWidget, QButtonGroup, QProxyStyle, QStyle)
-from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QTimer, QPointF # <--- Añade pyqtSignal aquí
+from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QTimer, QPointF, QEvent
 from PyQt6.QtGui import (QIcon, QColor, QPalette, QFont, QPainter, QBrush, QPen, 
                          QLinearGradient, QPixmap, QPainterPath, QFontDatabase,
                          QTransform, QCursor, QFontMetricsF)
@@ -1002,8 +994,7 @@ class AssetsPanel(QFrame):
         self.tree_widget.verticalScrollBar().setValue(scroll_pos)
 
     def _procesar_nodo_vdom(self, uid, parent_obj, padre_expandido=True):
-        from PyQt6.QtCore import Qt, QSize
-        from PyQt6.QtWidgets import QTreeWidgetItem, QApplication
+        from PyQt6.QtWidgets import QApplication
         
         elem = self.motor.elementos.get(uid)
         if not elem: return
@@ -1137,7 +1128,6 @@ class AssetsPanel(QFrame):
         return items
 
     def _manejar_drop_evento(self, event):
-        from PyQt6.QtWidgets import QTreeWidget
         # 1. Dejar que PyQt haga el movimiento visual nativo primero
         QTreeWidget.dropEvent(self.tree_widget, event)
         
@@ -1160,7 +1150,6 @@ class AssetsPanel(QFrame):
                 main_studio.canvas_view_actual.lienzo_modificado.emit()
 
     def _sincronizar_orden_capas(self):
-        from PyQt6.QtCore import Qt
         # Asignaremos z_index: el de más arriba en el panel tendrá el z_index mayor
         total_items = len(self.motor.elementos)
         contador_z = total_items * 10  # Damos un salto de 10 en 10
@@ -1187,8 +1176,6 @@ class AssetsPanel(QFrame):
         procesar_rama(root, None)
 
     def _manejar_teclas_panel(self, event):
-        from PyQt6.QtWidgets import QTreeWidget
-        from PyQt6.QtCore import Qt
         
         # 1. Obtenemos el lienzo principal donde está programada toda la magia
         main_studio = self.window()
@@ -1211,8 +1198,6 @@ class AssetsPanel(QFrame):
 
     def _mostrar_menu_contextual(self, pos):
         """Menú premium al hacer clic derecho en una capa del panel"""
-        from PyQt6.QtWidgets import QMenu
-        import qtawesome as qta
         
         item = self.tree_widget.itemAt(pos)
         if not item: return
@@ -1321,6 +1306,30 @@ class PremiumTextItem(QGraphicsPathItem):
         # Solo sumamos 2px para que el suavizado de bordes (antialiasing) respire.
         return self.path().boundingRect().adjusted(-2, -2, 2, 2)
 
+class PremiumStrokeItem(QGraphicsPathItem):
+    """Optimización Extrema para Vectores: Cacheo de Geometría.
+       Evita que la CPU recalcule miles de vértices al mover el ratón."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cached_rect = None
+        self._cached_shape = None
+
+    def setPath(self, path):
+        super().setPath(path)
+        # 🚀 LA MAGIA: Pre-calculamos la caja y la silueta matemática UNA SOLA VEZ
+        self._cached_rect = path.boundingRect().adjusted(-2, -2, 2, 2)
+        self._cached_shape = path
+        
+    def boundingRect(self):
+        # Entregamos la medida desde la memoria RAM, sin cálculos matemáticos
+        if self._cached_rect: return self._cached_rect
+        return super().boundingRect()
+
+    def shape(self):
+        # Entregamos la silueta de colisión instantáneamente
+        if self._cached_shape: return self._cached_shape
+        return super().shape()
+
 class PerformanceMonitor(QLabel):
     """Overlay tipo Game Engine para medir FPS y RAM en vivo"""
     def __init__(self, parent=None):
@@ -1377,32 +1386,33 @@ class InteractiveCanvasView(QGraphicsView):
         self.mapa_fuentes = mapa_fuentes
         self.zoom = 1.0
         
-        # 🚀 CAMBIO A SELECCIÓN MÚLTIPLE
-        self.uids_seleccionados = [] # Ahora es una lista
-        self.uid_activo = None       # El último elemento tocado (para el panel derecho)
-        
+        self.uids_seleccionados = [] 
+        self.uid_activo = None       
         self.modo_accion = None
         self.handle_activo = None 
-        
         self.start_pdf_x = 0
         self.start_pdf_y = 0
-        self.start_cajas = {} # Guardaremos las cajas de TODOS los seleccionados
-        
-        # Activar la caja de selección de arrastre (RubberBand) en el fondo
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
-        self.setRubberBandSelectionMode(Qt.ItemSelectionMode.IntersectsItemShape)
+        self.start_cajas = {} 
 
+        # 🚀 1. LÍMITES MATEMÁTICOS DE ESCENA
+        self.scene().setSceneRect(-2000, -2000, self.motor.w_pdf + 4000, self.motor.h_pdf + 4000)
+
+        # 🚀 2. BANDERAS RASTER DE MÁXIMO RENDIMIENTO (D3D11 Vía Bootloader)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
-        # 🚀 LAS 3 LÍNEAS DE ACELERACIÓN NATIVA (Estilo CorelDRAW)
-        # 1. SmartViewportUpdate pinta inteligentemente en vez de saturar la CPU con colisiones
+        self.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        # ⚡ EL SECRETO DE LOS 60 FPS: MinimalViewportUpdate
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
-        # 2. Le prohíbe al motor guardar estados inútiles del pincel en la memoria RAM
-        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontSavePainterState)
-        # 3. Evita ajustar el Antialiasing dinámicamente en tiempo real
-        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
         
+        # ⚡ MEMORIA Y CACHÉ
+        self.setCacheMode(QGraphicsView.CacheModeFlag.CacheBackground)
+        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
+        # ❌ (Línea de IndirectPainting eliminada, Qt6 ya lo hace por defecto)
+
+        # 🚀 3. INTERACCIÓN Y CÁMARA
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setRubberBandSelectionMode(Qt.ItemSelectionMode.IntersectsItemShape)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1414,23 +1424,25 @@ class InteractiveCanvasView(QGraphicsView):
             border-bottom-left-radius: 10px; 
             border-bottom-right-radius: 10px; 
             border-top-right-radius: 10px;   
-            border-top-left-radius: 0px; /* 🚀 Esquina superior izquierda CUADRADA */
+            border-top-left-radius: 0px; 
         """)
-        apply_shadow(self, radius=30, offset_y=15)
         self.setMouseTracking(True) 
 
         self.items_ui = {}       
         self.cache_pixmaps = {}  
         
+        # 🚀 4. DIBUJO DE LA HOJA
         self.hoja_fondo = QGraphicsRectItem(0, 0, self.motor.w_pdf, self.motor.h_pdf)
         self.hoja_fondo.setBrush(QBrush(QColor("#FFFFFF")))
         self.hoja_fondo.setPen(QPen(Qt.PenStyle.NoPen))
+        self.hoja_fondo.setZValue(-999999) # Fondo absoluto
         self.scene().addItem(self.hoja_fondo)
 
         self.tecla_s_presionada = False
         self.tecla_a_presionada = False
         self.grosor_pluma_actual = 3.0
 
+        # 🚀 5. MONITOR DE RENDIMIENTO
         self.perf_monitor = PerformanceMonitor(self)
         self.perf_monitor.show()
 
@@ -1461,7 +1473,6 @@ class InteractiveCanvasView(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
         elif tool_id == "eyedropper": 
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            import qtawesome as qta
             try:
                 pixmap_cursor = qta.icon('fa5s.eye-dropper', color="#FFFFFF").pixmap(20, 20)
                 self.viewport().setCursor(QCursor(pixmap_cursor, 0, 19))
@@ -1804,7 +1815,8 @@ class InteractiveCanvasView(QGraphicsView):
 
             elif tipo == 'Trazo':
                 if uid not in self.items_ui:
-                    item = QGraphicsPathItem()
+                    # 🚀 APLICAMOS NUESTRO VECTOR OPTIMIZADO
+                    item = PremiumStrokeItem() # <--- ¡CAMBIADO AQUÍ!
                     item.setData(100, uid)
                     self.scene().addItem(item)
                     self.items_ui[uid] = item
@@ -1830,19 +1842,16 @@ class InteractiveCanvasView(QGraphicsView):
                 # Como solo se hace una vez al soltar, no causará lag al mover.
                 path_suave = path_suave.simplified() # 🚀 RESTAURADO AL SOLTAR
                 
-                # 3. LA CURA DEL APLASTAMIENTO Y DESFASE:
-                t_final = self._obtener_matriz_acumulada(uid)
-                path_global = t_final.map(path_suave)
-                item.setPath(path_global)
+                item.setPath(path_suave) # Le damos la miniatura
                 
-                # 🚀 LA CURA DEL FANTASMA DEL ANTI-ALIASING: 
-                # Le ponemos un borde de medio píxel del mismo color de la tinta.
-                # Esto sella microscópicamente los recortes que genera la GPU al doblar la curva.
+                # 🚀 Sello microscópico de Anti-Aliasing
                 color_borde = elem.get('borde_color', '#000000')
                 item.setPen(QPen(QColor(color_borde), 0.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
                 item.setBrush(QBrush(QColor(color_borde)))
                 
-                item.setTransform(QTransform())
+                # 4. Y en lugar de deformar el vector, usamos la matriz para MOVER EL ÍTEM COMPLETO
+                t_final = self._obtener_matriz_acumulada(uid)
+                item.setTransform(t_final) # <--- ¡ESTO ES LO QUE HACE QUE VUELE!
                 item.setOpacity(self._obtener_opacidad_acumulada(uid))
                 
             elif tipo in ['Forma', 'Marco'] and isinstance(item, QGraphicsPathItem):
@@ -1972,15 +1981,16 @@ class InteractiveCanvasView(QGraphicsView):
         
         item.setData(100, uid)
         
-        # 🚀 LA MAGIA DE LA VELOCIDAD: Hardware Caching (Texturas de GPU)
+        # 🚀 LA MAGIA DE LA VELOCIDAD: Hardware Caching Local
         es_svg = tipo == 'Foto' and str(elem.get('contenido', '')).lower().endswith('.svg')
         es_texto = tipo == 'Texto'
         es_trazo = tipo == 'Trazo'
         
-        if es_svg or es_texto:
-            # Le dice a PyQt que guarde los vectores y TIPOGRAFÍAS como texturas 
-            # estáticas en la memoria de video. El movimiento será instantáneo.
-            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        # 🚀 AÑADIMOS EL TRAZO PARA QUE SE COMPORTE COMO UNA FOTO AL MOVERSE
+        if es_svg or es_texto or es_trazo:
+            # ItemCoordinateCache aísla la figura en una textura pequeña (BBox real)
+            # Esto permite hacer zoom y mover a 60 FPS sin recalcular matemáticas.
+            item.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
         else:
             item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
 
@@ -1995,12 +2005,8 @@ class InteractiveCanvasView(QGraphicsView):
         return self.motor.ui_a_pdf(pos_scene.x(), pos_scene.y(), 1.0)
 
     def dibujar_controles_seleccion(self):
-        # 🚀 LA CURA DEL RATÓN: Si estamos arrastrando, NO destruimos la caja,
-        # solo la hacemos invisible. Si la destruimos, Qt aborta el clic al instante.
         if self.modo_accion in ["MOVE", "RESIZE", "ROTATE", "ROTATE_3D"]: 
             if hasattr(self, 'grupo_controles') and self.grupo_controles:
-                # 🚀 LA EXCEPCIÓN 3D: Si estamos rotando en 3D, NO ocultamos el grupo maestro.
-                # Esto permite que el anillo activo y su nodo sigan siendo visibles.
                 if self.modo_accion != "ROTATE_3D":
                     self.grupo_controles.setOpacity(0.0) 
             return
@@ -2012,27 +2018,32 @@ class InteractiveCanvasView(QGraphicsView):
             self.scene().removeItem(self.grupo_nodos)
         
         if not self.uids_seleccionados: return
-        
-        # 🚀 CURA DE RENDIMIENTO: Ocultar controles durante CUALQUIER transformación
         if self.modo_accion in ["MOVE", "RESIZE", "ROTATE", "ROTATE_3D"]: return
         
         es_multiple = len(self.uids_seleccionados) > 1
         
+        # 🚀 LA CURA DE LA SELECCIÓN MÚLTIPLE: 
+        # Forzamos ángulo 0.0 y no aplicamos 3D/Perspectiva a la caja grupal
         if es_multiple:
-            if self.modo_accion == "ROTATE" and hasattr(self, 'caja_multiple_fija'):
-                caja = self.caja_multiple_fija
-                angulo_pdf = self.angulo_multiple_fijo
-            else:
-                caja = self.motor.obtener_caja_multiple(self.uids_seleccionados)
-                angulo_pdf = 0.0
+            caja = self.motor.obtener_caja_multiple(self.uids_seleccionados)
+            angulo_pdf = 0.0
+            rot_3dx = 0.0
+            rot_3dy = 0.0
+            tiene_perspectiva = False
+            # Para la caja múltiple, el "elem" simulado estará vacío
+            elem = {} 
         else:
             caja = self.motor.obtener_caja_elemento(self.uid_activo)
             elem = self.motor.elementos[self.uid_activo]
             angulo_pdf = float(elem.get('rotacion', 0.0))
+            rot_3dx = float(elem.get('rot_3d_x', 0.0))
+            rot_3dy = float(elem.get('rot_3d_y', 0.0))
+            persp = elem.get('perspectiva', [[0,0], [0,0], [0,0], [0,0]])
+            tiene_perspectiva = any(pt != [0,0] for pt in persp)
             
         if not caja: return
 
-        # 🚀 ESCUDO MATEMÁTICO 2: Protegemos la caja de selección azul
+        # Transformación de las coordenadas de la caja a UI (PyQt)
         cx = float(caja.get('x') or 0.0)
         cy = float(caja.get('y') or 0.0)
         cw = float(caja.get('w') or 0.0)
@@ -2042,55 +2053,58 @@ class InteractiveCanvasView(QGraphicsView):
         w_orig, h_orig = x2_orig - x1_orig, y2_orig - y1_orig
         cx_orig, cy_orig = x1_orig + (w_orig / 2.0), y1_orig + (h_orig / 2.0)
 
-        elem = self.motor.elementos.get(self.uid_activo, {}) if not es_multiple else {}
-        rot_3dx = float(elem.get('rot_3d_x', 0.0))
-        rot_3dy = float(elem.get('rot_3d_y', 0.0))
-        persp = elem.get('perspectiva', [[0,0], [0,0], [0,0], [0,0]])
-        tiene_perspectiva = any(pt != [0,0] for pt in persp)
-
         from PyQt6.QtGui import QTransform, QPolygonF
         from PyQt6.QtCore import QPointF
         
-        # 1. Aplicamos 3D para sacar los límites reales
-        hw_orig, hh_orig = w_orig / 2.0, h_orig / 2.0
-        t_3d = QTransform()
-        if rot_3dx != 0.0 or rot_3dy != 0.0:
-            t_3d.rotate(rot_3dx, Qt.Axis.XAxis)
-            t_3d.rotate(rot_3dy, Qt.Axis.YAxis)
+        # =========================================================
+        # OJO: Si es múltiple, nos saltamos todo este cálculo deformante 
+        # y pasamos directo a las variables _f (finales)
+        # =========================================================
+        if not es_multiple:
+            # 1. Aplicamos 3D para sacar los límites reales
+            hw_orig, hh_orig = w_orig / 2.0, h_orig / 2.0
+            t_3d = QTransform()
+            if rot_3dx != 0.0 or rot_3dy != 0.0:
+                t_3d.rotate(rot_3dx, Qt.Axis.XAxis)
+                t_3d.rotate(rot_3dy, Qt.Axis.YAxis)
+                
+            pts_3d = [t_3d.map(QPointF(-hw_orig, -hh_orig)), t_3d.map(QPointF(hw_orig, -hh_orig)), 
+                      t_3d.map(QPointF(hw_orig, hh_orig)), t_3d.map(QPointF(-hw_orig, hh_orig))]
             
-        pts_3d = [t_3d.map(QPointF(-hw_orig, -hh_orig)), t_3d.map(QPointF(hw_orig, -hh_orig)), 
-                  t_3d.map(QPointF(hw_orig, hh_orig)), t_3d.map(QPointF(-hw_orig, hh_orig))]
-        
-        min_x_3d = min(p.x() for p in pts_3d)
-        max_x_3d = max(p.x() for p in pts_3d)
-        min_y_3d = min(p.y() for p in pts_3d)
-        max_y_3d = max(p.y() for p in pts_3d)
+            min_x_3d = min(p.x() for p in pts_3d)
+            max_x_3d = max(p.x() for p in pts_3d)
+            min_y_3d = min(p.y() for p in pts_3d)
+            max_y_3d = max(p.y() for p in pts_3d)
 
-        # 2. Perspectiva exacta amarrada a esos límites
-        if tiene_perspectiva:
-            poly_src = QPolygonF([
-                QPointF(min_x_3d, min_y_3d), QPointF(max_x_3d, min_y_3d),
-                QPointF(max_x_3d, max_y_3d), QPointF(min_x_3d, max_y_3d)
-            ])
-            poly_dst = QPolygonF([
-                QPointF(min_x_3d + persp[0][0], min_y_3d + persp[0][1]),
-                QPointF(max_x_3d + persp[1][0], min_y_3d + persp[1][1]),
-                QPointF(max_x_3d + persp[2][0], max_y_3d + persp[2][1]),
-                QPointF(min_x_3d + persp[3][0], max_y_3d + persp[3][1])
-            ])
-            t_deform = QTransform()
-            QTransform.quadToQuad(poly_src, poly_dst, t_deform)
-            
-            pts_final = [t_deform.map(p) for p in poly_src]
-            min_x_f = min(p.x() for p in pts_final)
-            max_x_f = max(p.x() for p in pts_final)
-            min_y_f = min(p.y() for p in pts_final)
-            max_y_f = max(p.y() for p in pts_final)
+            # 2. Perspectiva exacta amarrada a esos límites
+            if tiene_perspectiva:
+                poly_src = QPolygonF([
+                    QPointF(min_x_3d, min_y_3d), QPointF(max_x_3d, min_y_3d),
+                    QPointF(max_x_3d, max_y_3d), QPointF(min_x_3d, max_y_3d)
+                ])
+                poly_dst = QPolygonF([
+                    QPointF(min_x_3d + persp[0][0], min_y_3d + persp[0][1]),
+                    QPointF(max_x_3d + persp[1][0], min_y_3d + persp[1][1]),
+                    QPointF(max_x_3d + persp[2][0], max_y_3d + persp[2][1]),
+                    QPointF(min_x_3d + persp[3][0], max_y_3d + persp[3][1])
+                ])
+                t_deform = QTransform()
+                QTransform.quadToQuad(poly_src, poly_dst, t_deform)
+                
+                pts_final = [t_deform.map(p) for p in poly_src]
+                min_x_f = min(p.x() for p in pts_final)
+                max_x_f = max(p.x() for p in pts_final)
+                min_y_f = min(p.y() for p in pts_final)
+                max_y_f = max(p.y() for p in pts_final)
+            else:
+                min_x_f, max_x_f = min_x_3d, max_x_3d
+                min_y_f, max_y_f = min_y_3d, max_y_3d
         else:
-            min_x_f, max_x_f = min_x_3d, max_x_3d
-            min_y_f, max_y_f = min_y_3d, max_y_3d
+            # 🚀 Si es múltiple, la caja gigante que sacó el motor ya viene perfecta y plana
+            min_x_f, max_x_f = -(w_orig/2.0), (w_orig/2.0)
+            min_y_f, max_y_f = -(h_orig/2.0), (h_orig/2.0)
 
-        # 3. La caja azul perfecta
+        # 3. La caja azul (o naranja) perfecta
         x1 = cx_orig + min_x_f
         y1 = cy_orig + min_y_f
         x2 = cx_orig + max_x_f
@@ -2461,7 +2475,6 @@ class InteractiveCanvasView(QGraphicsView):
 
     def abrir_editor_texto(self, uid):
         from PyQt6.QtWidgets import QTextEdit, QLabel
-        from PyQt6.QtCore import Qt
         
         elem = self.motor.elementos[uid]
         if hasattr(self, 'editor_flotante') and self.editor_flotante:
@@ -2542,7 +2555,6 @@ class InteractiveCanvasView(QGraphicsView):
         self.setFocus()
 
     def eventFilter(self, source, event):
-        from PyQt6.QtCore import QEvent, Qt
         if hasattr(self, 'editor_flotante') and source is self.editor_flotante:
             if event.type() == QEvent.Type.KeyPress:
                 if event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -2560,7 +2572,6 @@ class InteractiveCanvasView(QGraphicsView):
     def _ejecutar_copiar(self):
         """Copia los elementos seleccionados al Portapapeles Global"""
         if not self.uids_seleccionados: return
-        import copy
         elementos_copiados = []
         uids_ya_copiados = set() # Evitar duplicados
         
@@ -2581,7 +2592,6 @@ class InteractiveCanvasView(QGraphicsView):
             copiar_recursivo(uid)
             
         self.window().portapapeles_global = elementos_copiados
-        print(f"✅ {len(elementos_copiados)} elementos copiados al portapapeles.")
 
     def _ejecutar_pegar(self, pdf_x=None, pdf_y=None):
         """Pega los elementos. Si recibe coordenadas, los centra en el ratón."""
@@ -2589,8 +2599,6 @@ class InteractiveCanvasView(QGraphicsView):
         if not clipboard: return
         
         self.motor.registrar_punto_historial()
-        import time
-        import copy
         
         nuevos_uids_seleccion = []
         mapa_uids = {} 
@@ -2973,7 +2981,6 @@ class InteractiveCanvasView(QGraphicsView):
             
             # C. ¿Hicimos clic en el ESPACIO VACÍO del lienzo con la herramienta de TEXTO?
             if getattr(self, 'herramienta_activa', 'select') == 'text':
-                import time
                 uid_nuevo = f"txt_{int(time.time() * 1000)}"
                 
                 self.motor.registrar_punto_historial()
@@ -3124,7 +3131,6 @@ class InteractiveCanvasView(QGraphicsView):
 
     def _mostrar_menu_capas(self, pos_global):
         """Menú para Objetos: Capas, Copiar, Ocultar, Bloquear, Descomponer y Eliminar"""
-        from PyQt6.QtWidgets import QMenu
         menu = QMenu(self.viewport())
         menu.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -3247,7 +3253,6 @@ class InteractiveCanvasView(QGraphicsView):
 
     def _mostrar_menu_canvas(self, pos_global, pdf_x, pdf_y):
         """Menú del Fondo: Pegar"""
-        from PyQt6.QtWidgets import QMenu
         menu = QMenu(self.viewport())
         menu.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -3402,40 +3407,52 @@ class InteractiveCanvasView(QGraphicsView):
                 if cantidad_sel > 0:
                     self.motor.mover_multiples(self.uids_seleccionados, dx, dy)
                     
-                    if cantidad_sel > 50:
-                        self.dibujar_controles_seleccion() 
-                    else:
-                        dy_qt = -dy 
-                        for uid in self.uids_seleccionados:
-                            if uid in self.items_ui:
-                                self.items_ui[uid].moveBy(dx, dy_qt) 
-                                
-                        self.dibujar_controles_seleccion()
+                    # =========================================================
+                    # 🚀 EL TRUCO DEL BATCH RENDERING (LA CURA DE LOS 3 FPS)
+                    # Apagamos la pantalla. Moveremos los 30 objetos en la oscuridad
+                    # para que Qt no intente renderizar cada paso individualmente.
+                    # =========================================================
+                    self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.NoViewportUpdate)
+                    
+                    dy_qt = -dy 
+                    for uid in self.uids_seleccionados:
+                        if uid in self.items_ui:
+                            self.items_ui[uid].moveBy(dx, dy_qt) 
+                            
+                    # Encendemos la pantalla y forzamos UN SOLO DIBUJADO maestro
+                    self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
+                    self.viewport().update()
+                    
+                    self.dibujar_controles_seleccion()
 
                 self.last_mouse_x = pdf_x
                 self.last_mouse_y = pdf_y
 
+        
         # =======================================================
         # 🚀 2.5 DIBUJO EN VIVO MAGISTRAL (Con sensibilidad de teclas)
         # =======================================================
         if self.modo_accion == "DRAWING":
             pdf_x, pdf_y = self.get_pdf_coords(event)
-            
+                
             # 🚀 DINÁMICA S/A (Crecer / Encoger suavemente)
             if self.tecla_s_presionada: self.grosor_pluma_actual = min(60.0, self.grosor_pluma_actual + 1.0)
             if self.tecla_a_presionada: self.grosor_pluma_actual = max(1.0, self.grosor_pluma_actual - 1.0)
-            
+                
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.puntos_trazo = [self.puntos_trazo[0], (QPointF(pdf_x, pdf_y), self.grosor_pluma_actual)] 
-                self.puntos_visuales = [self.puntos_visuales[0], (pos_scene, self.grosor_pluma_actual)]          
+                self.puntos_visuales = [self.puntos_visuales[0], (pos_scene, self.grosor_pluma_actual)]         
             else:
                 self.puntos_trazo.append((QPointF(pdf_x, pdf_y), self.grosor_pluma_actual)) 
-                self.puntos_visuales.append((pos_scene, self.grosor_pluma_actual))          
-            
-            # Renderizado en vivo con curvas de Bézier (Limpiamos los argumentos)
+                self.puntos_visuales.append((pos_scene, self.grosor_pluma_actual))         
+                
+            # 🚀 RESTAURADO: Tu generador de curvas perfecto.
+            # Al no tener que recalcular la sombra de toda la pantalla,
+            # esto ahora se dibujará instantáneamente.
             path_suave = self._generar_patron_variable(self.puntos_visuales)
             self.item_trazo_temp.setPath(path_suave)
             return
+            
 
         # 🚀 3. LÓGICA DE TRANSFORMACIÓN Y ARRASTRE
         if self.modo_accion and self.uids_seleccionados: 
@@ -3473,10 +3490,8 @@ class InteractiveCanvasView(QGraphicsView):
                 dx_global = pdf_x - self.start_pdf_x
                 dy_global = pdf_y - self.start_pdf_y
                 
-                # Deshacemos la rotación para que el ratón no se invierta si la curva está rotada
                 angulo = float(self.motor.elementos[self.uid_activo].get('rotacion', 0.0))
                 if angulo != 0.0:
-                    import math
                     rad = math.radians(angulo)
                     dx = (dx_global * math.cos(rad)) + (dy_global * math.sin(rad))
                     dy = -(dx_global * math.sin(rad)) + (dy_global * math.cos(rad))
@@ -3486,11 +3501,11 @@ class InteractiveCanvasView(QGraphicsView):
                 idx = self.nodo_activo_idx
                 pt_orig = self.start_puntos[idx]
                 
-                # 🚀 1. Actualizamos el punto exacto en el motor
+                # 1. Actualizamos el punto exacto en el motor
                 self.motor.elementos[self.uid_activo]['puntos'][idx][0] = round(pt_orig[0] + dx, 2)
                 self.motor.elementos[self.uid_activo]['puntos'][idx][1] = round(pt_orig[1] + dy, 2)
                 
-                # 🚀 2. REGENRAMOS EL PATH VISUAL DEL ITEM REAL (Tiempo Real)
+                # 2. REGENERAMOS EL PATH VISUAL DEL ITEM REAL
                 item_real = self.items_ui[self.uid_activo]
                 puntos_relativos = self.motor.elementos[self.uid_activo].get('puntos', [])
                 pts_relativos_qt = []
@@ -3498,18 +3513,24 @@ class InteractiveCanvasView(QGraphicsView):
                     g_pt = p_rel[2] if len(p_rel) > 2 else float(self.motor.elementos[self.uid_activo].get('borde_grosor', 3.0))
                     pts_relativos_qt.append((QPointF(p_rel[0], -p_rel[1]), g_pt))
                 
-                # Generamos el path suave (ribbon sin .simplified() para velocidad en vivo)
                 path_suave = self._generar_patron_variable(pts_relativos_qt)
-                
-                # Mapeamos la transformación global
                 t_final = self._obtener_matriz_acumulada(self.uid_activo)
-                path_global = t_final.map(path_suave)
+                item_real.setPath(path_suave)
+                item_real.setTransform(t_final)
                 
-                # 🚀 3. Asignamos el nuevo path al item real (invalidando el renderizado viejo)
-                item_real.setPath(path_global)
+                # 🚀 LA CURA DE LA DESTRUCCIÓN MASIVA: Mover el nodo sin recrear todo
+                # ❌ Eliminamos self.dibujar_controles_seleccion()
+                # ✅ En su lugar, buscamos el puntito blanco específico y lo movemos.
+                pos_actualizada = t_final.map(QPointF(puntos_relativos[idx][0], -puntos_relativos[idx][1]))
+                ns = 6.0 / self.zoom 
                 
-                # 🚀 4. Regeneramos los nodos visuales
-                self.dibujar_controles_seleccion()
+                for child in self.grupo_nodos.childItems():
+                    if child.data(0) == f"nodo_{idx}":
+                        if idx == 0 or idx == len(puntos_relativos) - 1:
+                            child.setRect(pos_actualizada.x() - (ns*1.4)/2, pos_actualizada.y() - (ns*1.4)/2, ns*1.4, ns*1.4)
+                        else:
+                            child.setRect(pos_actualizada.x() - ns/2, pos_actualizada.y() - ns/2, ns, ns)
+                        break
                 
                 return
 
@@ -3606,7 +3627,6 @@ class InteractiveCanvasView(QGraphicsView):
                 else:
                     dx, dy = dx_global, dy_global
                     
-                import copy
                 nueva_persp = copy.deepcopy(self.start_persp)
                 
                 mapa_idx = {'p_tl': 0, 'p_tr': 1, 'p_br': 2, 'p_bl': 3}
@@ -3749,10 +3769,6 @@ class InteractiveCanvasView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
 
-        if not self.modo_accion:
-            super().mouseReleaseEvent(event)
-            return
-
         # 🚀 FINALIZACIÓN DEL DIBUJO CON PLUMA
         if getattr(self, 'modo_accion', None) == "DRAWING":
             self.modo_accion = None
@@ -3861,7 +3877,6 @@ class InteractiveCanvasView(QGraphicsView):
                             p[1] = round(p[1] - cy_rel, 2)
                             
                         angulo = float(elem.get('rotacion', 0.0))
-                        import math
                         rad = math.radians(angulo)
                         dx_glob = (cx_rel * math.cos(rad)) - (cy_rel * math.sin(rad))
                         dy_glob = (cx_rel * math.sin(rad)) + (cy_rel * math.cos(rad))
@@ -3914,25 +3929,32 @@ class InteractiveCanvasView(QGraphicsView):
                 super().mouseReleaseEvent(event) 
                 
                 items_atrapados = self.scene().selectedItems()
-                uids_atrapados = []
+                uids_atrapados = set() # Usamos set para evitar duplicados
                 
                 for item in items_atrapados:
                     uid = item.data(100) 
                     if uid and uid in self.motor.elementos:
-                        # Lógica de Grupos: Redirigir al padre
-                        elem = self.motor.elementos[uid]
-                        uid_final = elem.get('parent_marco') if elem.get('parent_marco') in self.motor.elementos else uid
-                        
-                        if uid_final not in uids_atrapados:
-                            uids_atrapados.append(uid_final)
+                        # 🚀 LA CURA DE LA JERARQUÍA: Subimos hasta el ancestro más viejo
+                        uid_padre = self.motor.elementos[uid].get('parent_marco')
+                        while uid_padre and uid_padre in self.motor.elementos:
+                            uid = uid_padre
+                            uid_padre = self.motor.elementos[uid].get('parent_marco')
+                            
+                        uids_atrapados.add(uid)
                         
                 self.scene().clearSelection()
                         
                 if uids_atrapados:
-                    self.uids_seleccionados = uids_atrapados
-                    self.uid_activo = uids_atrapados[-1] 
-                    self.elemento_seleccionado.emit(self.uid_activo)
+                    self.uids_seleccionados = list(uids_atrapados)
+                    self.uid_activo = self.uids_seleccionados[-1] 
+                    
                     self.dibujar_controles_seleccion()
+                    self.elemento_seleccionado.emit(self.uid_activo)
+                else:
+                    self.uids_seleccionados = []
+                    self.uid_activo = None
+                    self.dibujar_controles_seleccion()
+                    self.elemento_seleccionado.emit("")
                 return 
 
         self.modo_accion = None
@@ -3986,7 +4008,6 @@ class InteractiveCanvasView(QGraphicsView):
     def solicitar_actualizacion_masiva(self):
         """Acumula llamadas para evitar lag del Panel de Capas"""
         if not hasattr(self, '_timer_masivo'):
-            from PyQt6.QtCore import QTimer
             self._timer_masivo = QTimer(self)
             self._timer_masivo.setSingleShot(True)
             self._timer_masivo.timeout.connect(self._ejecutar_actualizacion_masiva)
@@ -4011,7 +4032,7 @@ class InteractiveCanvasView(QGraphicsView):
         
         # 🚀 0. PANEO NATIVO (Espacio) - Motor C++
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and not getattr(self, 'editor_flotante', None):
-            self.setInteractive(False) # 🚀 APAGAMOS LA INTERACTIVIDAD AL PANEAR
+            self.setInteractive(False)
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             event.accept()
             return
@@ -4066,47 +4087,32 @@ class InteractiveCanvasView(QGraphicsView):
 
         # 🚀 3. DUPLICAR RÁPIDO (Ctrl + D)
         elif is_ctrl and event.key() == Qt.Key.Key_D:
-            print("🛑 [DUPLICAR] 1. Tecla Ctrl+D presionada.")
             
             if self.uids_seleccionados:
                 if not event.isAutoRepeat():
                     self.motor.registrar_punto_historial() 
                     
                 uids_viejos = set(self.motor.elementos.keys())
-                print(f"👉 [DUPLICAR] 2. UIDs base a duplicar: {self.uids_seleccionados}")
                 
-                # 🚀 INICIO DE CARGA
                 QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                 
                 try:
                     nuevos_uids = []
                     for uid_sel in self.uids_seleccionados:
-                        # 👇 Estas tres líneas ahora tienen el margen (indentación) correcto 👇
-                        print(f"👉 [DUPLICAR] 3. Ordenando al motor duplicar: {uid_sel}")
                         nuevo_uid = self.motor.duplicar_elemento(uid_sel)
                         if nuevo_uid: nuevos_uids.append(nuevo_uid)
                 
                     uids_nuevos_totales = list(set(self.motor.elementos.keys()) - uids_viejos)
-                    print(f"👉 [DUPLICAR] 4. El motor CREADO todos estos elementos (Padres + Hijos): {uids_nuevos_totales}")
                     
                     if nuevos_uids:
                         self.uids_seleccionados = nuevos_uids
                         self.uid_activo = nuevos_uids[-1] 
-                        
-                        print("🛑 [DUPLICAR] 5. Iniciando sincronización del lienzo...")
                         self.sincronizar_con_motor(uids_nuevos_totales) 
-                        print("✅ [DUPLICAR] 6. Lienzo sincronizado correctamente.")
-                        
-                        print("🛑 [DUPLICAR] 7. Intentando dibujar la caja azul de selección...")
                         self.dibujar_controles_seleccion()
-                        print("✅ [DUPLICAR] 8. Caja azul dibujada correctamente.")
-                        
                         self.elemento_seleccionado.emit(self.uid_activo)
                         self.solicitar_actualizacion_masiva()
-                        print("✅ [DUPLICAR] 9. ¡Proceso completado!")
                         
                 finally:
-                    # 🚀 FIN DE CARGA
                     QApplication.restoreOverrideCursor()
                     
             event.accept()
@@ -4140,7 +4146,6 @@ class InteractiveCanvasView(QGraphicsView):
         elif is_ctrl and event.key() == Qt.Key.Key_G and not (mods & Qt.KeyboardModifier.ShiftModifier):
             if len(self.uids_seleccionados) > 1:
                 self.motor.registrar_punto_historial()
-                import time
                 nuevo_grupo_uid = f"grupo_{int(time.time() * 1000)}"
                 
                 caja_grupo = self.motor.obtener_caja_multiple(self.uids_seleccionados)
@@ -4368,7 +4373,6 @@ class InteractiveCanvasView(QGraphicsView):
            Miter Robusto (Anti-Spike), Cúpulas perfectas y Rendimiento Máximo."""
         from PyQt6.QtGui import QPainterPath, QPolygonF
         from PyQt6.QtCore import QPointF, Qt
-        import math
         
         path_final = QPainterPath()
         path_final.setFillRule(Qt.FillRule.WindingFill) 
@@ -4400,7 +4404,7 @@ class InteractiveCanvasView(QGraphicsView):
             d3 = math.hypot(p2.x() - p0.x(), p2.y() - p0.y())
             
             longitud_curva = (d1 + d2 + d3) / 2.0
-            pasos = max(5, min(int(longitud_curva / 3.0), 100)) 
+            pasos = max(3, min(int(longitud_curva / 8.0), 30))
 
             for j in range(1, pasos + 1):
                 t = j / float(pasos)
@@ -4413,7 +4417,7 @@ class InteractiveCanvasView(QGraphicsView):
         p_ultimo, w_ultimo = puntos_finos[-1]
         p_final_real, w_final_real = puntos_con_grosor[-1]
         dist_fin = math.hypot(p_final_real.x() - p_ultimo.x(), p_final_real.y() - p_ultimo.y())
-        pasos_fin = max(2, min(int(dist_fin / 3.0), 30))
+        pasos_fin = max(2, min(int(dist_fin / 8.0), 15))
 
         for j in range(1, pasos_fin + 1):
             t = j / float(pasos_fin)
@@ -4491,7 +4495,8 @@ class InteractiveCanvasView(QGraphicsView):
         # =======================================================
         def generar_tapa(pt_centro, radio, es_inicio):
             arco = []
-            pasos = max(8, int(radio * 0.8))
+            # 🚀 Reducimos los puntos de la cúpula de 0.8 a 0.4
+            pasos = max(4, int(radio * 0.4))
             
             if es_inicio:
                 sig = puntos_finos[1][0]
@@ -4715,7 +4720,6 @@ class PenSubToolBar(QFrame):
         lbl_suavizado.setStyleSheet("color: #85868A; font-size: 11px; font-weight: bold; margin-left: 5px;")
         layout.addWidget(lbl_suavizado)
 
-        from PyQt6.QtWidgets import QSlider
         self.slider_suavizado = QSlider(Qt.Orientation.Horizontal)
         self.slider_suavizado.setRange(0, 20)
         self.slider_suavizado.setValue(8)
@@ -5060,7 +5064,6 @@ class CustomTitleBar(QFrame):
 
     def toggle_maximize(self):
         """Control manual de maximizado con memoria física"""
-        from PyQt6.QtCore import QTimer
         
         # 🚀 PASE VIP: Le avisamos al lienzo que este cambio es INTENCIONAL
         self.parent_window._cambio_intencional = True
@@ -5078,7 +5081,6 @@ class CustomTitleBar(QFrame):
 
     # 🚀 MOTOR DE ARRASTRE MANUAL INDESTRUCTIBLE
     def mousePressEvent(self, event):
-        from PyQt6.QtCore import Qt
         if event.button() == Qt.MouseButton.LeftButton:
             self.start_pos = event.globalPosition().toPoint()
 
@@ -5092,7 +5094,6 @@ class CustomTitleBar(QFrame):
         self.start_pos = None
 
     def mouseDoubleClickEvent(self, event):
-        from PyQt6.QtCore import Qt
         if event.button() == Qt.MouseButton.LeftButton:
             self.toggle_maximize()
 
@@ -5243,7 +5244,6 @@ class PremiumMessageBox(QDialog):
 
     # 🚀 MOTOR DE ARRASTRE MANUAL PARA EL DIÁLOGO
     def mousePressEvent(self, event):
-        from PyQt6.QtCore import Qt
         if event.button() == Qt.MouseButton.LeftButton:
             self.start_pos = event.globalPosition().toPoint()
             
@@ -5290,7 +5290,6 @@ class MainDesignStudio(QMainWindow):
         self.main_container = QFrame()
         self.main_container.setObjectName("main_container")
         self.main_container.setStyleSheet(f"QFrame#main_container {{ background-color: {BG_NAV}; border-radius: 12px; border: 1px solid {BORDER_NAV}; }}")
-        apply_shadow(self.main_container, radius=25, offset_y=8) 
         
         container_layout = QVBoxLayout(self.main_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -5434,7 +5433,6 @@ class MainDesignStudio(QMainWindow):
             if hasattr(self, 'size_grip'): self.size_grip.show()
 
     def changeEvent(self, event):
-        from PyQt6.QtCore import QEvent, QTimer
         if event.type() == QEvent.Type.WindowStateChange:
             
             # 🚀 SI TIENE PASE VIP (Viene del botón), lo dejamos encogerse en paz
@@ -5702,8 +5700,6 @@ class MainDesignStudio(QMainWindow):
         
         if rutas:
             self.motor.registrar_punto_historial()
-            import time
-            from PIL import Image
 
             # 🚀 INICIO DE CARGA: Bloqueamos interfaz y mostramos reloj
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -5896,11 +5892,9 @@ class MainDesignStudio(QMainWindow):
         self.motor.modificar_elemento(uid, nombre=nuevo_nombre)
 
     def _al_reordenar_capas(self, source_parent, source_start, source_end, destination_parent, destination_row):
-        print("🛑 [DRAG&DROP] 1. Qt soltó la capa. Pausa de 50ms iniciada...")
         QTimer.singleShot(50, self._procesar_reordenamiento_diferido)
 
     def _procesar_reordenamiento_diferido(self):
-        print("🛑 [DRAG&DROP] 2. Iniciando procesamiento matemático...")
         z_index = 10000 
         tree = self.assets_panel.tree_widget
         
@@ -5917,7 +5911,6 @@ class MainDesignStudio(QMainWindow):
                     
                     # 🚀 MAGIA UX: AUTO-AGRUPACIÓN TIPO iOS
                     if padre_elem and padre_elem.get('tipo') != 'Marco':
-                        import time
                         # 1. Creamos el nuevo grupo
                         nuevo_grupo_uid = f"grupo_auto_{int(time.time() * 1000)}_{uid}"
                         
@@ -5947,7 +5940,6 @@ class MainDesignStudio(QMainWindow):
         for i in range(tree.topLevelItemCount()):
             procesar_nodo(tree.topLevelItem(i), parent_uid=None)
                 
-        print("✅ [DRAG&DROP] 3. Matemática lista. Refrescando paneles...")
         self.motor._normalizar_z_index() # 🚀 Limpiamos la matemática de capas
         self.main_canvas.actualizar_lienzo()
         QTimer.singleShot(10, self._refrescar_panel_capas)
@@ -6104,7 +6096,49 @@ class MainDesignStudio(QMainWindow):
                         
                 QApplication.restoreOverrideCursor()
 
+
+
+def boot_motor_aceleracion():
+    """🚀 VECTIFY ENGINE: HARDWARE DETECTION & OVERRIDE 🚀"""
+    print("\n" + "="*50)
+    print("🚀 === INICIANDO MOTOR (DETECCIÓN DE HARDWARE) === 🚀")
+    
+    # 1. Análisis de CPU
+    hilos = os.cpu_count() or 4
+    print(f"🧠 Núcleos Lógicos de CPU: {hilos} Activos")
+
+    # 2. Análisis de RAM y Asignación Dinámica
+    ram_total_gb = psutil.virtual_memory().total / (1024**3)
+    print(f"💾 RAM Total del Sistema: {ram_total_gb:.1f} GB")
+    
+    from PyQt6.QtGui import QImageReader
+    if ram_total_gb >= 16.0:
+        QImageReader.setAllocationLimit(4096) # 4 GB de buffer para gigantografías
+        print("✅ Modo Ultra-RAM Activado (Buffer de 4GB)")
+    else:
+        QImageReader.setAllocationLimit(2048) # 2 GB
+        print("✅ Modo RAM Estándar Activado (Buffer de 2GB)")
+
+    # 3. 🎮 FORZAR LA GPU NATIVA (Sin QOpenGLWidget)
+    # Usamos la Interfaz de Renderizado de Hardware (RHI) de Qt6
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    
+    if platform.system() == "Windows":
+        # Direct3D 11 es estable, rápido y NO rompe ventanas sin bordes
+        os.environ["QT_RHI_BACKEND"] = "d3d11"
+        os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
+        print("🎮 Motor Gráfico Enrutado a: Direct3D 11 (GPU)")
+    elif platform.system() == "Darwin":
+        os.environ["QT_RHI_BACKEND"] = "metal"
+        print("🎮 Motor Gráfico Enrutado a: Metal (GPU Apple Silicon)")
+        
+    print("========================================================\n")
+
+
 if __name__ == "__main__":
+    # Arrancamos la detección ANTES de que nazca la aplicación
+    boot_motor_aceleracion()
+    
     app = QApplication(sys.argv)
     window = MainDesignStudio()
     window.show()

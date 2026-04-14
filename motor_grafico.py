@@ -1854,12 +1854,21 @@ class RectorOP:
            Perspectiva y Rotación individual de todos los hijos."""
         from PyQt6.QtGui import QTransform, QPolygonF
         from PyQt6.QtCore import QPointF, Qt
+        import math
         
         min_x, max_x = float('inf'), float('-inf')
         min_y, max_y = float('inf'), float('-inf')
         validos = 0
         
+        # Expandimos los UIDs para incluir automáticamente a los hijos si seleccionaste un grupo
+        uids_expandidos = set(uids)
         for uid in uids:
+            if uid in self.elementos and self.elementos[uid]['tipo'] == 'Marco':
+                for h_uid, h_e in self.elementos.items():
+                    if h_e.get('parent_marco') == uid:
+                        uids_expandidos.add(h_uid)
+        
+        for uid in uids_expandidos:
             elem = self.elementos.get(uid)
             if not elem: continue
             
@@ -1904,12 +1913,24 @@ class RectorOP:
             # 4. Rotación 2D Plana
             t.rotate(-float(elem.get('rotacion', 0.0)))
             
-            # 5. Mapear los vértices base deformados al espacio del grupo
+            # 5. 🚀 LA CURA: Calcular la posición global resolviendo la anidación de grupos sin UI
+            cx_global = cx
+            cy_global = cy
+            
+            padre_uid = elem.get('parent_marco')
+            while padre_uid and padre_uid in self.elementos:
+                caja_padre = self.obtener_caja_elemento(padre_uid)
+                if caja_padre:
+                    cx_global += float(caja_padre.get('x') or 0.0)
+                    cy_global += float(caja_padre.get('y') or 0.0)
+                padre_uid = self.elementos[padre_uid].get('parent_marco')
+
+            # 6. Mapear vértices
             pts_locales = [QPointF(-hw, -hh), QPointF(hw, -hh), QPointF(hw, hh), QPointF(-hw, hh)]
             for p in pts_locales:
                 p_global = t.map(p)
-                px = cx + p_global.x()
-                py = cy + p_global.y()
+                px = cx_global + p_global.x()
+                py = cy_global + p_global.y()
                 
                 min_x, max_x = min(min_x, px), max(max_x, px)
                 min_y, max_y = min(min_y, py), max(max_y, py)
