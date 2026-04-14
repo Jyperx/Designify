@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
                              QSlider, QSizePolicy, QTreeWidget, QTreeWidgetItem, QGraphicsPixmapItem, QTreeWidgetItemIterator,
                              QGraphicsPathItem, QGraphicsTextItem, QGraphicsSimpleTextItem, QGraphicsItem, QComboBox, QListWidget, QListWidgetItem, QAbstractItemView,
                              QFileDialog, QMenu, QWidgetAction, QDialog, QMessageBox, QTabBar, QSizeGrip, QStackedWidget, QButtonGroup, QProxyStyle, QStyle)
-from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QTimer # <--- Añade pyqtSignal aquí
+from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QTimer, QPointF # <--- Añade pyqtSignal aquí
 from PyQt6.QtGui import (QIcon, QColor, QPalette, QFont, QPainter, QBrush, QPen, 
                          QLinearGradient, QPixmap, QPainterPath, QFontDatabase,
                          QTransform, QCursor, QFontMetricsF)
@@ -1388,14 +1388,16 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 RESTRICCIÓN 3D / PERSPECTIVA: Embudo de Selección Única
         # =======================================================
         if tool_id in ["3d", "perspective"] and len(self.uids_seleccionados) > 1:
-            # Si había varios, soltamos todos menos el primero (o el último seleccionado)
             self.uid_activo = self.uids_seleccionados[0]
             self.uids_seleccionados = [self.uid_activo]
-            
-            # Repintamos la caja (ahora individual) y avisamos al panel derecho
             self.dibujar_controles_seleccion()
             QTimer.singleShot(0, lambda: self.elemento_seleccionado.emit(self.uid_activo))
         # =======================================================
+
+        # 🚀 LA CURA DEL CURSOR FANTASMA: Quitamos la mano de todos los objetos si tienes la pluma
+        cursor_obj = Qt.CursorShape.CrossCursor if tool_id in ['pen', '3d', 'perspective'] else Qt.CursorShape.OpenHandCursor
+        for item in self.items_ui.values():
+            item.setCursor(cursor_obj)
 
         if tool_id == "hand":
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
@@ -1459,12 +1461,17 @@ class InteractiveCanvasView(QGraphicsView):
             # 1. ESCALADO (Ajustar al tamaño real de la caja)
             if is_base:
                 tipo = elem.get('tipo')
-                pw, ph = 100.0, 100.0
+                # 🚀 LA CURA DEL GIGANTISMO: Si no se define, no lo escalamos por defecto
+                pw, ph = w_real, h_real 
+                
                 if tipo == 'Foto':
                     item = self.items_ui.get(nodo_uid)
                     if item and item.data(998): pw, ph = item.data(998)
                 elif tipo == 'Texto':
-                    pw, ph = elem.get('_qt_w', w_real), elem.get('_qt_h', h_real)
+                    pw, ph = float(elem.get('_qt_w', w_real)), float(elem.get('_qt_h', h_real))
+                elif tipo == 'Trazo':
+                    # Buscamos el tamaño con el que nació el dibujo
+                    pw, ph = float(elem.get('base_w', w_real)), float(elem.get('base_h', h_real))
                 
                 scale_x = w_real / pw if pw > 0 else 1.0
                 scale_y = h_real / ph if ph > 0 else 1.0
@@ -1737,6 +1744,48 @@ class InteractiveCanvasView(QGraphicsView):
                 # 🚀 APLICACIÓN MATEMÁTICA JERÁRQUICA
                 item.setTransform(self._obtener_matriz_acumulada(uid))
                 item.setOpacity(self._obtener_opacidad_acumulada(uid))
+
+            elif tipo == 'Trazo':
+                if uid not in self.items_ui:
+                    item = QGraphicsPathItem()
+                    item.setData(100, uid)
+                    self.scene().addItem(item)
+                    self.items_ui[uid] = item
+                else:
+                    item = self.items_ui[uid]
+                    
+                # 1. Recuperamos los puntos relativos limpios
+                from PyQt6.QtCore import QPointF
+                puntos_relativos = elem.get('puntos', [])
+                pts_relativos_qt = []
+                
+                for p_rel in puntos_relativos:
+                    # Invertimos Y para pasar de PDF a Qt (sin sumar X o Y globales)
+                    pts_relativos_qt.append(QPointF(p_rel[0], -p_rel[1]))
+                    
+                # 2. Generamos la curva suave
+                path_suave = self._generar_patron_suave(pts_relativos_qt)
+                
+                # 3. 🚀 LA CURA DEL APLASTAMIENTO Y DESFASE:
+                # Mapeamos la curva a través de la matriz. Esto deforma la curva 
+                # matemáticamente pero DEJA INTACTO el grosor de la tinta.
+                t_final = self._obtener_matriz_acumulada(uid)
+                path_global = t_final.map(path_suave)
+                item.setPath(path_global)
+                
+                # 4. Estilos del trazo (Vectorial puro)
+                color_borde = elem.get('borde_color', '#000000')
+                grosor_borde = float(elem.get('borde_grosor', 3.0))
+                
+                pen = QPen(QColor(color_borde), grosor_borde, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                item.setPen(pen)
+                from PyQt6.QtGui import QBrush
+                item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                
+                # 5. Quitamos la matriz al contenedor para que Qt no aplaste la tinta
+                from PyQt6.QtGui import QTransform
+                item.setTransform(QTransform())
+                item.setOpacity(self._obtener_opacidad_acumulada(uid))
                 
             elif tipo in ['Forma', 'Marco'] and isinstance(item, QGraphicsPathItem):
                 forma, radio = elem.get('forma', 'Rectángulo'), elem.get('radio_esquinas', 0.0)
@@ -1852,13 +1901,17 @@ class InteractiveCanvasView(QGraphicsView):
             # 🚀 PASAMOS A RENDERIZADO VECTORIAL GRUPAL
             item = QGraphicsItemGroup()
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-            item.setCursor(Qt.CursorShape.OpenHandCursor)
             item.setData(100, uid) 
         else: 
             item = QGraphicsPathItem()
 
         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        item.setCursor(Qt.CursorShape.OpenHandCursor)
+        
+        # 🚀 CURA: El cursor nace según la herramienta actual, no como mano por defecto
+        herramienta = getattr(self, 'herramienta_activa', 'select')
+        cursor_obj = Qt.CursorShape.CrossCursor if herramienta in ['pen', '3d', 'perspective'] else Qt.CursorShape.OpenHandCursor
+        item.setCursor(cursor_obj)
+        
         item.setData(100, uid)
         
         # 🚀 LA MAGIA DE LA VELOCIDAD: Hardware Caching (Texturas de GPU)
@@ -1895,6 +1948,9 @@ class InteractiveCanvasView(QGraphicsView):
             
         if hasattr(self, 'grupo_controles') and self.grupo_controles in self.scene().items():
             self.scene().removeItem(self.grupo_controles)
+
+        if hasattr(self, 'grupo_nodos') and self.grupo_nodos in self.scene().items():
+            self.scene().removeItem(self.grupo_nodos)
         
         if not self.uids_seleccionados: return
         
@@ -1990,7 +2046,14 @@ class InteractiveCanvasView(QGraphicsView):
 
         herramienta = getattr(self, 'herramienta_activa', 'select')
 
-        if herramienta not in ['3d', 'perspective']:
+        # 🚀 RESTRICCIÓN VECTORIAL: Los trazos son 2D puros. Anulamos controles 3D.
+        if elem.get('tipo') == 'Trazo' and herramienta in ['3d', 'perspective']:
+            herramienta = 'select'
+
+        # 🚀 LA CURA DE LA VISTA LIMPIA: Si tienes la pluma, NO dibujamos ninguna caja.
+        if herramienta == 'pen':
+            pass 
+        elif herramienta not in ['3d', 'perspective']:
             # ==========================================
             # 🟦 MODO NORMAL: Caja Azul y 8 Cuadritos Blancos
             # ==========================================
@@ -2232,6 +2295,58 @@ class InteractiveCanvasView(QGraphicsView):
         self.grupo_controles.setZValue(999999.0)
         self.grupo_controles.setOpacity(1.0)
         self.scene().addItem(self.grupo_controles)
+
+        # ==========================================
+        # 🚀 OVERLAY DE NODOS VECTORIALES (Para Trazos) - Estilo Premium
+        # ==========================================
+        if not es_multiple and elem.get('tipo') == 'Trazo' and herramienta in ['select', 'pen']:
+            self.grupo_nodos = QGraphicsItemGroup()
+            self.grupo_nodos.setZValue(999999.5) # Encima de todo
+            
+            pts_rel = elem.get('puntos', [])
+            t_final = self._obtener_matriz_acumulada(self.uid_activo)
+            
+            # Nodos más pequeños y elegantes
+            ns = 6.0 / self.zoom 
+            
+            for i, p in enumerate(pts_rel):
+                p_qt = QPointF(p[0], -p[1])
+                p_scene = t_final.map(p_qt)
+                
+                # Usamos círculos en lugar de cuadrados para un look más orgánico
+                if i == 0 or i == len(pts_rel) - 1:
+                    # Nodos Extremos: Un poco más grandes, borde naranja brillante (Indican que el imán funciona)
+                    nodo = QGraphicsEllipseItem(p_scene.x() - (ns*1.4)/2, p_scene.y() - (ns*1.4)/2, ns*1.4, ns*1.4)
+                    nodo.setBrush(QBrush(QColor("#FFFFFF")))
+                    nodo.setPen(QPen(QColor(COLOR_ACCENT), 1.5 / self.zoom))
+                else:
+                    # Nodos Internos: Pequeños, borde gris sutil (Solo referencia visual)
+                    nodo = QGraphicsEllipseItem(p_scene.x() - ns/2, p_scene.y() - ns/2, ns, ns)
+                    nodo.setBrush(QBrush(QColor("#FFFFFF")))
+                    nodo.setPen(QPen(QColor("#6A6D75"), 1.0 / self.zoom))
+                
+                self.grupo_nodos.addToGroup(nodo)
+                
+            self.scene().addItem(self.grupo_nodos)
+
+    def _suavizar_trazo(self, puntos, factor):
+        """Aplica un algoritmo de Media Móvil (Moving Average) para fluidificar el trazo manual"""
+        if len(puntos) < 3 or factor == 0:
+            return puntos
+            
+        puntos_suaves = [puntos[0]]
+        ventana = factor # Cuántos puntos vecinos promedia
+        for i in range(1, len(puntos) - 1):
+            inicio = max(0, i - ventana)
+            fin = min(len(puntos), i + ventana + 1)
+            vecinos = puntos[inicio:fin]
+            
+            avg_x = sum(p.x() for p in vecinos) / len(vecinos)
+            avg_y = sum(p.y() for p in vecinos) / len(vecinos)
+            puntos_suaves.append(QPointF(avg_x, avg_y))
+            
+        puntos_suaves.append(puntos[-1])
+        return puntos_suaves
 
     def wheelEvent(self, event):
         """Controla el Zoom y el Desplazamiento usando el estándar de diseño"""
@@ -2573,6 +2688,8 @@ class InteractiveCanvasView(QGraphicsView):
                 self._mostrar_menu_canvas(event.globalPosition().toPoint(), pdf_x, pdf_y)
             return
 
+
+
         # 🚀 4. SELECCIÓN, ARRASTRE Y HERRAMIENTA DE TEXTO (Clic Izquierdo)
         if event.button() == Qt.MouseButton.LeftButton:
             pos_view = event.position().toPoint() if hasattr(event, 'position') else event.pos()
@@ -2580,6 +2697,83 @@ class InteractiveCanvasView(QGraphicsView):
             pdf_x, pdf_y = self.get_pdf_coords(event)
             
             self.hubo_arrastre = False # 🚀 Bandera para saber si solo dio clic o arrastró
+            
+            # =======================================================
+            # 🚀 INICIO DEL DIBUJO CON PLUMA E IMÁN VECTORIAL
+            # =======================================================
+            herramienta = getattr(self, 'herramienta_activa', 'select')
+            if herramienta == 'pen':
+                from PyQt6.QtGui import QPainterPath, QPen, QColor
+                from PyQt6.QtCore import QPointF, QLineF
+                
+                uid_continuar = None
+                puntos_heredados_pdf = []
+                puntos_heredados_scene = []
+                invertir_trazo = False
+                
+                # 🚀 1. EL IMÁN: ¿Hicimos clic cerca de un nodo blanco?
+                if self.uid_activo and self.motor.elementos.get(self.uid_activo, {}).get('tipo') == 'Trazo':
+                    elem = self.motor.elementos[self.uid_activo]
+                    t_final = self._obtener_matriz_acumulada(self.uid_activo)
+                    pts_rel = elem.get('puntos', [])
+                    
+                    if pts_rel:
+                        p_inicio_scene = t_final.map(QPointF(pts_rel[0][0], -pts_rel[0][1]))
+                        p_fin_scene = t_final.map(QPointF(pts_rel[-1][0], -pts_rel[-1][1]))
+                        
+                        umbral = 15.0 / self.zoom # Rango de atracción del imán magnético
+                        
+                        if QLineF(pos_scene, p_fin_scene).length() <= umbral:
+                            uid_continuar = self.uid_activo
+                        elif QLineF(pos_scene, p_inicio_scene).length() <= umbral:
+                            uid_continuar = self.uid_activo
+                            invertir_trazo = True # Dibujó al revés, volteamos la línea
+
+                # 🚀 2. PREPARACIÓN DE MEMORIA
+                if uid_continuar:
+                    # HORNEAMOS LA LÍNEA VIEJA para continuarla en pantalla sin cortes
+                    elem = self.motor.elementos[uid_continuar]
+                    pts_rel = elem.get('puntos', [])
+                    t_final = self._obtener_matriz_acumulada(uid_continuar)
+                    
+                    for p in pts_rel:
+                        p_scene = t_final.map(QPointF(p[0], -p[1]))
+                        p_pdf_x, p_pdf_y = self.motor.ui_a_pdf(p_scene.x(), p_scene.y(), 1.0)
+                        
+                        puntos_heredados_scene.append(p_scene)
+                        puntos_heredados_pdf.append(QPointF(p_pdf_x, p_pdf_y))
+                        
+                    if invertir_trazo:
+                        puntos_heredados_scene.reverse()
+                        puntos_heredados_pdf.reverse()
+                        
+                    self.puntos_trazo = puntos_heredados_pdf
+                    self.puntos_visuales = puntos_heredados_scene
+                    self.uid_en_edicion_trazo = uid_continuar
+                    
+                    # Ocultamos la línea original temporalmente mientras añadimos tinta
+                    if uid_continuar in self.items_ui:
+                        self.items_ui[uid_continuar].setVisible(False)
+                else:
+                    self.puntos_trazo = [QPointF(pdf_x, pdf_y)] 
+                    self.puntos_visuales = [pos_scene]          
+                    self.uid_en_edicion_trazo = None
+
+                # 🚀 3. EL TRAZO TEMPORAL
+                self.item_trazo_temp = QGraphicsPathItem()
+                color_pen = QColor("#FE5934") 
+                self.item_trazo_temp.setPen(QPen(color_pen, 4.0 / self.zoom, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                self.item_trazo_temp.setZValue(999999)
+                self.scene().addItem(self.item_trazo_temp)
+                
+                # Si es continuación, dibujamos la base de inmediato para que la veas
+                if uid_continuar:
+                    path_suave = self._generar_patron_suave(self.puntos_visuales)
+                    self.item_trazo_temp.setPath(path_suave)
+                
+                self.modo_accion = "DRAWING"
+                return
+            # =======================================================
             
             # A. ¿Hicimos clic en un control de transformación (caja azul)?
             item = self.scene().itemAt(pos_scene, self.viewportTransform())
@@ -2830,11 +3024,17 @@ class InteractiveCanvasView(QGraphicsView):
         return cursor
 
     def setCursor(self, cursor):
-        """Interceptamos setCursor para evitar el bug de 'flecha parpadeante' de Qt al arrastrar"""
-        # 🚀 BLOQUEO TOTAL: Si estamos arrastrando, rotando o redimensionando, el cursor se congela
+        """Interceptamos setCursor para evitar el bug de 'flecha parpadeante' y anular manos estorbosas"""
+        # 🚀 BLOQUEO TOTAL: Si estamos transformando, el cursor se congela
         if getattr(self, 'modo_accion', None) in ["RESIZE", "MOVE", "ROTATE", "ROTATE_3D"]:
             return
             
+        # 🚀 LA CURA DEL CURSOR ESTORBOSO: Si la pluma está activa, la mira es absoluta
+        if getattr(self, 'herramienta_activa', 'select') == 'pen':
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            super().setCursor(Qt.CursorShape.CrossCursor)
+            return
+
         self.viewport().setCursor(cursor)
         super().setCursor(cursor)
 
@@ -3045,6 +3245,7 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 PRIORIDAD ABSOLUTA: HOVER DEL CUENTAGOTAS NATIVO
         # ========================================================
         herramienta = getattr(self, 'herramienta_activa', 'select')
+        pos_scene = self.mapToScene(event.pos())
         
         if herramienta == "eyedropper":
             pos_view = event.position().toPoint() if hasattr(event, 'position') else event.pos()
@@ -3121,6 +3322,8 @@ class InteractiveCanvasView(QGraphicsView):
                             self.setCursor(Qt.CursorShape.SizeAllCursor)
                             encontrado = True; break
 
+        
+
         # 🚀 3. LÓGICA DE TRANSFORMACIÓN Y ARRASTRE
         if self.modo_accion and self.uids_seleccionados: 
             pdf_x, pdf_y = self.get_pdf_coords(event)
@@ -3149,7 +3352,56 @@ class InteractiveCanvasView(QGraphicsView):
 
                 self.last_mouse_x = pdf_x
                 self.last_mouse_y = pdf_y
+
+        # =======================================================
+        # 🚀 2.5 DIBUJO EN VIVO MAGISTRAL
+        # =======================================================
+        if self.modo_accion == "DRAWING":
+            pdf_x, pdf_y = self.get_pdf_coords(event)
+            
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Si presionas Shift, borramos el historial curvo y unimos el inicio con el ratón
+                self.puntos_trazo = [self.puntos_trazo[0], QPointF(pdf_x, pdf_y)] 
+                self.puntos_visuales = [self.puntos_visuales[0], pos_scene]          
+            else:
+                # Dibujo libre normal
+                self.puntos_trazo.append(QPointF(pdf_x, pdf_y)) 
+                self.puntos_visuales.append(pos_scene)          
+            
+            # Renderizado en vivo con curvas de Bézier
+            path_suave = self._generar_patron_suave(self.puntos_visuales)
+            self.item_trazo_temp.setPath(path_suave)
+            return
+
+        # 🚀 3. LÓGICA DE TRANSFORMACIÓN Y ARRASTRE
+        if self.modo_accion and self.uids_seleccionados: 
+            pdf_x, pdf_y = self.get_pdf_coords(event)
+            es_multiple = len(self.uids_seleccionados) > 1
+            
+            if self.modo_accion == "MOVE":
+                self.hubo_arrastre = True
                 
+                dx = pdf_x - self.last_mouse_x
+                dy = pdf_y - self.last_mouse_y
+                
+                cantidad_sel = len(self.uids_seleccionados)
+                
+                if cantidad_sel > 0:
+                    self.motor.mover_multiples(self.uids_seleccionados, dx, dy)
+                    
+                    if cantidad_sel > 50:
+                        self.dibujar_controles_seleccion() 
+                    else:
+                        dy_qt = -dy 
+                        for uid in self.uids_seleccionados:
+                            if uid in self.items_ui:
+                                self.items_ui[uid].moveBy(dx, dy_qt) 
+                                
+                        self.dibujar_controles_seleccion()
+
+                self.last_mouse_x = pdf_x
+                self.last_mouse_y = pdf_y
+
             elif self.modo_accion == "RESIZE":
                 mods = event.modifiers()
                 candado_activo = False
@@ -3237,7 +3489,6 @@ class InteractiveCanvasView(QGraphicsView):
                 
                 angulo = float(self.motor.elementos[self.uid_activo].get('rotacion', 0.0))
                 if angulo != 0.0:
-                    import math
                     rad = math.radians(angulo)
                     dx = (dx_global * math.cos(rad)) + (dy_global * math.sin(rad))
                     dy = -(dx_global * math.sin(rad)) + (dy_global * math.cos(rad))
@@ -3377,6 +3628,85 @@ class InteractiveCanvasView(QGraphicsView):
             painter.end()
 
     def mouseReleaseEvent(self, event):
+
+        if not self.modo_accion:
+            super().mouseReleaseEvent(event)
+            return
+
+        # 🚀 FINALIZACIÓN DEL DIBUJO CON PLUMA
+        if getattr(self, 'modo_accion', None) == "DRAWING":
+            self.modo_accion = None
+            if hasattr(self, 'item_trazo_temp'):
+                self.scene().removeItem(self.item_trazo_temp)
+            
+            # 🚀 LA CURA: Leemos el slider directamente desde la sub-barra premium
+            ventana_principal = self.window()
+            valor_suavizado = 8
+            if hasattr(ventana_principal, 'main_canvas') and hasattr(ventana_principal.main_canvas, 'sub_toolbar_pen'):
+                valor_suavizado = ventana_principal.main_canvas.sub_toolbar_pen.slider_suavizado.value()
+            
+            tolerancia = 0.2 + (valor_suavizado * 0.3)
+            
+            puntos_finales = self._simplificar_puntos(self.puntos_trazo, epsilon=tolerancia)
+            
+            if len(puntos_finales) >= 2:
+                min_x = min(p.x() for p in puntos_finales)
+                max_x = max(p.x() for p in puntos_finales)
+                min_y = min(p.y() for p in puntos_finales)
+                max_y = max(p.y() for p in puntos_finales)
+                
+                w = max(max_x - min_x, 1.0)
+                h = max(max_y - min_y, 1.0)
+                cx, cy = min_x + w / 2.0, min_y + h / 2.0
+                
+                pts_relativos = [[round(p.x() - cx, 2), round(p.y() - cy, 2)] for p in puntos_finales]
+                
+                # ==========================================
+                # 🚀 LA MAGIA DE LA FUSIÓN: Sobreescribimos o creamos
+                # ==========================================
+                uid_existente = getattr(self, 'uid_en_edicion_trazo', None)
+                color_trazo = getattr(self.parent_panel.properties_panel, 'color_actual', '#000000')
+                
+                if uid_existente:
+                    uid = uid_existente
+                    z_index = self.motor.elementos[uid].get('z_index', len(self.motor.elementos) * 10)
+                    # Respetamos el color original porque estamos alargando una línea vieja
+                    color_trazo = self.motor.elementos[uid].get('borde_color', color_trazo)
+                else:
+                    uid = self.motor.generar_uid(prefijo="pen")
+                    z_index = len(self.motor.elementos) * 10
+                
+                self.motor.elementos[uid] = {
+                    'tipo': 'Trazo',
+                    'x': min_x, 'y': min_y, 'w': w, 'h': h,
+                    'base_w': w, 'base_h': h,
+                    'puntos': pts_relativos,
+                    'borde_color': color_trazo,
+                    'borde_grosor': 3.0,
+                    'rotacion': 0.0, 'rot_3d_x': 0.0, 'rot_3d_y': 0.0,
+                    'perspectiva': [[0,0],[0,0],[0,0],[0,0]],
+                    'z_index': z_index
+                }
+                
+                self.uid_en_edicion_trazo = None # Limpiamos memoria
+                # ==========================================
+                
+                self.motor.registrar_punto_historial()
+                self.uids_seleccionados = [uid]
+                self.uid_activo = uid
+                self.sincronizar_con_motor()
+                self.dibujar_controles_seleccion()
+                self.elemento_seleccionado.emit(uid)
+                self.solicitar_actualizacion_masiva()
+            else:
+                # 🚀 PREVENCIÓN DE BUG: Si dio un micro-clic pero no dibujó nada, 
+                # y habíamos ocultado una línea para editarla, la revivimos.
+                uid_existente = getattr(self, 'uid_en_edicion_trazo', None)
+                if uid_existente and uid_existente in self.items_ui:
+                    self.items_ui[uid_existente].setVisible(True)
+                self.uid_en_edicion_trazo = None
+                
+            return
 
         if event.button() == Qt.MouseButton.LeftButton:
             
@@ -3834,6 +4164,74 @@ class InteractiveCanvasView(QGraphicsView):
         # Para cualquier otra tecla que no sea el espacio
         super().keyReleaseEvent(event) 
 
+    # =======================================================
+    # 🚀 MOTOR DE SUAVIZADO Y CURVAS MAGISTRAL
+    # =======================================================
+    def _simplificar_puntos(self, puntos, epsilon=1.0):
+        """Simplifica la lista de puntos usando el algoritmo Ramer-Douglas-Peucker
+        para reducir datos innecesarios sin perder la forma esencial."""
+        from PyQt6.QtCore import QLineF
+        
+        if len(puntos) < 3:
+            return puntos
+
+        def d_espacio(p, a, b):
+            if a == b: return QLineF(p, a).length()
+            # Distancia de punto a línea
+            return abs((b.x() - a.x()) * (a.y() - p.y()) - (a.x() - p.x()) * (b.y() - a.y())) / \
+                   ((b.x() - a.x())**2 + (b.y() - a.y())**2)**0.5
+
+        dmax = 0.0
+        index = 0
+        end = len(puntos) - 1
+        for i in range(1, end):
+            d = d_espacio(puntos[i], puntos[0], puntos[end])
+            if d > dmax:
+                index = i
+                dmax = d
+
+        if dmax > epsilon:
+            rec1 = self._simplificar_puntos(puntos[:index+1], epsilon)
+            rec2 = self._simplificar_puntos(puntos[index:], epsilon)
+            return rec1[:-1] + rec2
+        else:
+            return [puntos[0], puntos[end]]
+
+    def _generar_patron_suave(self, puntos):
+        """Genera un QPainterPath perfectamente suave usando interpolación cuadrática 
+        de Bézier entre los puntos medios de los segmentos."""
+        from PyQt6.QtGui import QPainterPath
+        
+        path = QPainterPath()
+        if len(puntos) < 2:
+            return path
+            
+        path.moveTo(puntos[0])
+        
+        if len(puntos) == 2:
+            path.lineTo(puntos[1])
+            return path
+            
+        # Algoritmo de suavizado magistral: Conectar puntos medios con curvas
+        for i in range(1, len(puntos) - 1):
+            p_actual = puntos[i]
+            p_siguiente = puntos[i+1]
+            
+            # Calculamos el punto medio exacto del segmento actual al siguiente
+            mid_x = (p_actual.x() + p_siguiente.x()) / 2
+            mid_y = (p_actual.y() + p_siguiente.y()) / 2
+            punto_medio = QPointF(mid_x, mid_y)
+            
+            # Creamos una curva cuadrática de Bézier:
+            # Control: El punto actual (p_actual)
+            # Fin: El punto medio (punto_medio)
+            # Esto obliga a la curva a pasar 'cerca' de p_actual pero sin picos.
+            path.quadTo(p_actual, punto_medio)
+            
+        # Conectamos con una línea recta el último tramo al punto final
+        path.lineTo(puntos[-1])
+        return path
+
 class DocumentTab(QWidget):
     """Una pestaña independiente que contiene su propio Motor y su propio Lienzo"""
     def __init__(self, main_studio, mapa_fuentes, ruta_archivo=None):
@@ -3999,6 +4397,31 @@ class PenSubToolBar(QFrame):
         btn_default = next(b for b in self.btn_group.buttons() if b.property("brush_id") == "boligrafo")
         btn_default.setChecked(True)
         self._update_icons()
+
+        # ==========================================
+        # 🚀 LA CURA: SLIDER PREMIUM INTEGRADO
+        # ==========================================
+        separador = QFrame()
+        separador.setFrameShape(QFrame.Shape.VLine)
+        separador.setStyleSheet("background-color: #2A2B31; max-height: 20px;")
+        layout.addWidget(separador)
+
+        lbl_suavizado = QLabel("Suavizado")
+        lbl_suavizado.setStyleSheet("color: #85868A; font-size: 11px; font-weight: bold; margin-left: 5px;")
+        layout.addWidget(lbl_suavizado)
+
+        from PyQt6.QtWidgets import QSlider
+        self.slider_suavizado = QSlider(Qt.Orientation.Horizontal)
+        self.slider_suavizado.setRange(0, 20)
+        self.slider_suavizado.setValue(8)
+        self.slider_suavizado.setFixedWidth(80)
+        self.slider_suavizado.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.slider_suavizado.setStyleSheet(f"""
+            QSlider::groove:horizontal {{ border: none; background: #18191D; height: 4px; border-radius: 2px; }}
+            QSlider::handle:horizontal {{ background: {COLOR_ACCENT}; border: none; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+            QSlider::handle:horizontal:hover {{ background: #FFFFFF; transform: scale(1.2); }}
+        """)
+        layout.addWidget(self.slider_suavizado)
 
     def _on_brush_clicked(self, btn):
         self.pincel_actual = btn.property("brush_id")

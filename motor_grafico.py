@@ -38,6 +38,10 @@ class RectorOP:
         self.pila_deshacer = []
         self.pila_rehacer = []
 
+    def generar_uid(self, prefijo="elem"):
+        """Genera un ID único basado en el tiempo exacto para evitar colisiones."""
+        return f"{prefijo}_{int(time.time() * 1000)}"
+
     # ==========================================
     # GESTIÓN DE MEMORIA (GARBAGE COLLECTOR HÍBRIDO)
     # ==========================================
