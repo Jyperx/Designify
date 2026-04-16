@@ -1417,7 +1417,7 @@ class PremiumCompositeSvgItem(QGraphicsPathItem):
         # 2. Capa de retroalimentación (Hover Naranja sobre la pieza específica)
         if getattr(self, 'hovered_path', None):
             painter.setBrush(QBrush(QColor("#FE5934"))) 
-            painter.setPen(QPen(Qt.GlobalColor.white, 2.0))
+            painter.setPen(QPen(Qt.PenStyle.NoPen)) # 🚀 ADIÓS BORDE BLANCO, hola naranja puro
             painter.drawPath(self.hovered_path)
 
     def extraer_sub_forma(self, pos_scene):
@@ -1437,15 +1437,19 @@ class PremiumCompositeSvgItem(QGraphicsPathItem):
                 self.update() 
                 
                 caja = obj['data']['path'].boundingRect()
-                color = obj['data']['brush'].color().name()
+                brush = obj['data']['brush']
                 
-                # 🚀 LA CURA: Ahora devolvemos TODO el ADN de la pieza (Forma, Color y Matemática)
+                # Si es un color sólido sacamos el HEX, si es degradado lo dejamos en None
+                color_hex = brush.color().name() if brush.style() == Qt.BrushStyle.SolidPattern else None
+                
+                # 🚀 LA CURA: Devolvemos el Pincel (Brush) con todo el degradado intacto
                 return {
                     'x_local': caja.x(), 
                     'y_local': caja.y(), 
                     'w': caja.width(), 
                     'h': caja.height(), 
-                    'color': color,
+                    'color': color_hex,
+                    'brush': brush, 
                     'path': obj['data']['path'],
                     'tag': obj['data'].get('tag', 'path'),
                     'forma': obj['data'].get('forma', 'Rectángulo')
@@ -3156,7 +3160,7 @@ class InteractiveCanvasView(QGraphicsView):
             if uid_encontrado:
                 elem = self.motor.elementos.get(uid_encontrado)
 
-                # 👇 --- MOTOR DE EXTRACCIÓN INTELIGENTE V4 --- 👇
+                # 👇 --- MOTOR DE EXTRACCIÓN INTELIGENTE V5 (DEGRADADOS) --- 👇
                 if elem and elem.get('es_svg_complejo') and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
                     item_visual = self.items_ui.get(uid_encontrado)
                     if hasattr(item_visual, 'extraer_sub_forma'):
@@ -3167,12 +3171,13 @@ class InteractiveCanvasView(QGraphicsView):
                             # 1. Recuperamos la geometría exacta
                             from PyQt6.QtCore import QRectF, QSize
                             import tempfile
+                            import os
+                            import time
                             
                             caja_local = QRectF(datos_pieza['x_local'], datos_pieza['y_local'], datos_pieza['w'], datos_pieza['h'])
                             caja_scene = item_visual.mapToScene(caja_local).boundingRect()
                             pdf_cx, pdf_cy = self.motor.ui_a_pdf(caja_scene.center().x(), caja_scene.center().y(), 1.0)
                             
-                            # 🚀 Seguro matemático: Evita cajas con tamaño cero
                             w_real = max(0.5, caja_scene.width())
                             h_real = max(0.5, caja_scene.height())
 
@@ -3181,14 +3186,17 @@ class InteractiveCanvasView(QGraphicsView):
                             forma_final = datos_pieza.get('forma', 'Rectángulo')
                             contenido_final = ''
                             color_pieza = datos_pieza['color']
+                            brush_pieza = datos_pieza['brush'] # 🚀 Extraemos el pincel mágico
                             
-                            if datos_pieza.get('tag') == 'path':
+                            # 🚀 Si es un Path complejo O TIENE DEGRADADO, lo forzamos a ser un Mini-SVG
+                            es_degradado = brush_pieza.style() not in [Qt.BrushStyle.SolidPattern, Qt.BrushStyle.NoBrush]
+
+                            if datos_pieza.get('tag') == 'path' or es_degradado:
                                 tipo_final = 'Foto'
                                 ruta_temp = os.path.join(tempfile.gettempdir(), f"part_{int(time.time()*1000)}.svg")
                                 
-                                # 🚀 LA CURA REAL: Generador nativo de SVG en lugar de escribirlo a mano
                                 from PyQt6.QtSvg import QSvgGenerator
-                                from PyQt6.QtGui import QPainter, QBrush, QColor
+                                from PyQt6.QtGui import QPainter
                                 
                                 path_extraido = datos_pieza['path']
                                 caja_path = path_extraido.boundingRect()
@@ -3204,14 +3212,16 @@ class InteractiveCanvasView(QGraphicsView):
                                 
                                 painter = QPainter(generator)
                                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                                painter.setBrush(QBrush(QColor(color_pieza)))
+                                
+                                # 🚀 INYECCIÓN DEL DEGRADADO: Usamos el pincel original de Illustrator
+                                painter.setBrush(brush_pieza)
                                 painter.setPen(Qt.PenStyle.NoPen)
                                 painter.drawPath(path_normalizado)
                                 painter.end()
                                 
                                 contenido_final = ruta_temp
                             
-                            # 3. CREACIÓN EN EL MOTOR (¡Con el color_tx para que se vea!)
+                            # 3. CREACIÓN EN EL MOTOR
                             nuevo_uid = f"ext_{int(time.time() * 1000)}"
                             self.motor.agregar_elemento(
                                 nuevo_uid, tipo_final,
@@ -3219,16 +3229,19 @@ class InteractiveCanvasView(QGraphicsView):
                                 contenido=contenido_final,
                                 x=pdf_cx - (w_real / 2.0), y=pdf_cy - (h_real / 2.0), 
                                 w=w_real, h=h_real,
-                                color_tx=color_pieza, # 🚀 Esta es la llave mágica de la visibilidad
+                                color_tx=color_pieza, # Si era degradado esto es None, y usa el SVG generado
                                 borde_grosor=0,
                                 z_index=elem.get('z_index', 0) + 1,
                                 parent_marco=elem.get('parent_marco')
                             )
 
-                            # 4. Refrescar UI
+                            # 4. Refrescar UI (Y ASEGURAR QUE SE SELECCIONA EL HIJO)
                             self.scene().clearSelection()
                             self.uids_seleccionados = [nuevo_uid]
                             self.uid_activo = nuevo_uid
+                            
+                            self.modo_accion = None 
+
                             self.sincronizar_con_motor()
                             self.dibujar_controles_seleccion()
                             self.elemento_seleccionado.emit(nuevo_uid)
@@ -3236,7 +3249,7 @@ class InteractiveCanvasView(QGraphicsView):
                             if hasattr(self.parent_panel, 'window'): self.parent_panel.window()._refrescar_panel_capas()
 
                     event.accept()
-                    return
+                    return 
                 # 👆 --------------------------------------------------------- 👆
 
                 if elem and not elem.get('bloqueado', False) and not elem.get('oculto', False):
