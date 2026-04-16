@@ -1369,104 +1369,148 @@ class PremiumSvgItem(QGraphicsItem):
 
 class PremiumCompositeSvgItem(QGraphicsPathItem):
     """
-    🔥 EL ESTILO COREL: 1 solo objeto en escena, pinta sus piezas con colores originales y tiene Hover.
+    🔥 MOTOR FLYWEIGHT (SPATIAL CHUNKING): 
+    Renderiza 100,000+ vectores dividiéndolos en cuadrantes C++.
+    Destruye el lag del Zoom extremo al 100%.
     """
-    def __init__(self, sub_paths_data, uid, motor, parent=None):
+    def __init__(self, nucleo_compartido, uid, motor, parent=None):
         super().__init__(parent)
         self.uid = uid
         self.motor = motor
         
-        elem = self.motor.elementos.get(self.uid, {})
-        self.deleted_indices = elem.get('deleted_indices', [])
+        self.datos_maestros = nucleo_compartido['datos']
+        self.chunks_maestros = nucleo_compartido['chunks']
+        self.caja_maestra = nucleo_compartido['caja']
         
-        self.sub_paths = []
-        for i, data in enumerate(sub_paths_data):
-            if i not in self.deleted_indices:
-                self.sub_paths.append({'index': i, 'data': data})
+        self.chunks_locales = None # Se usa solo si extraemos piezas
+        
+        elem = self.motor.elementos.get(self.uid, {})
+        self.deleted_indices = set(elem.get('deleted_indices', [])) 
         
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setAcceptHoverEvents(True) 
         
-        # 🚀 ESCUDO DE RENDIMIENTO
-        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        # 🚀 NOCACHE + CHUNKS = VELOCIDAD DE LA LUZ
+        self.setCacheMode(QGraphicsItem.CacheMode.NoCache)
         self.hovered_path = None
         
-        self._rebuild_visual_path()
+        if self.deleted_indices:
+            self._hornear_chunks_locales()
 
-    def _rebuild_visual_path(self):
-        from PyQt6.QtGui import QPainterPath
-        path_total = QPainterPath()
-        for obj in self.sub_paths:
-            path_total.addPath(obj['data']['path'])
-        # Solo lo seteamos para la colisión del ratón, NO para pintarlo
-        self.setPath(path_total)
-
-    # 👇 🚀 LA CURA DE LOS BORDES FINOS: Bucle de pintado manual 👇
-    def paint(self, painter, option, widget=None):
-        from PyQt6.QtGui import QPainter, QColor, QPen, QBrush
-        from PyQt6.QtCore import Qt
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def _hornear_chunks_locales(self):
+        """Si extraemos una pieza, solo reconstruimos el Chunk afectado, los demás quedan intactos"""
+        from PyQt6.QtGui import QPicture, QPainter
+        from PyQt6.QtCore import QRectF
+        self.chunks_locales = []
         
-        # 1. PINTAMOS CADA PIEZA CON SU COLOR EXACTO (Adiós líneas negras)
-        for obj in self.sub_paths:
-            painter.setBrush(obj['data']['brush'])
-            painter.setPen(obj['data']['pen'])
-            painter.drawPath(obj['data']['path'])
+        for chunk in self.chunks_maestros:
+            # ¿A este chunk le falta alguna pieza que el usuario extrajo?
+            necesita_reconstruccion = any(d['global_idx'] in self.deleted_indices for d in chunk['datos'])
             
-        # 2. Capa de retroalimentación (Hover Naranja sobre la pieza específica)
+            if not necesita_reconstruccion:
+                self.chunks_locales.append(chunk) # Copia rápida
+            else:
+                pic = QPicture()
+                p = QPainter(pic)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                chunk_box = QRectF()
+                hay_visibles = False
+                
+                for d in chunk['datos']:
+                    if d['global_idx'] not in self.deleted_indices:
+                        chunk_box = chunk_box.united(d['bbox'])
+                        p.setBrush(d['brush'])
+                        p.setPen(d['pen'])
+                        p.drawPath(d['path'])
+                        hay_visibles = True
+                p.end()
+                
+                if hay_visibles:
+                    self.chunks_locales.append({'bbox': chunk_box, 'picture': pic, 'datos': chunk['datos']})
+
+    def boundingRect(self):
+        return self.caja_maestra
+
+    def shape(self):
+        from PyQt6.QtGui import QPainterPath
+        path = QPainterPath()
+        path.addRect(self.caja_maestra)
+        return path
+
+    def paint(self, painter, option, widget=None):
+        from PyQt6.QtGui import QColor, QPen, QBrush
+        from PyQt6.QtCore import Qt
+        
+        zoom = option.levelOfDetailFromTransform(painter.worldTransform())
+        if zoom < 0.10: 
+            painter.fillRect(self.caja_maestra, QColor("#85868A"))
+            return
+
+        rect_visible = option.exposedRect
+        chunks_activos = self.chunks_locales if getattr(self, 'chunks_locales', None) is not None else self.chunks_maestros
+
+        # 🚀 LA CURA DEL LAG EXTREMO: CULLING POR CHUNKS
+        # Solo le mandamos a la Tarjeta Gráfica los casetes que entran
+        # en ese cuadrito de 43x42 píxeles de la cámara.
+        for chunk in chunks_activos:
+            if rect_visible.intersects(chunk['bbox']):
+                painter.drawPicture(0, 0, chunk['picture'])
+                
+        # Capa Hover
         if getattr(self, 'hovered_path', None):
             painter.setBrush(QBrush(QColor("#FE5934"))) 
-            painter.setPen(QPen(Qt.PenStyle.NoPen)) # 🚀 ADIÓS BORDE BLANCO, hola naranja puro
+            painter.setPen(QPen(Qt.PenStyle.NoPen))
             painter.drawPath(self.hovered_path)
 
     def extraer_sub_forma(self, pos_scene):
         click_pos = self.mapFromScene(pos_scene)
-        for i in reversed(range(len(self.sub_paths))):
-            if self.sub_paths[i]['data']['path'].contains(click_pos):
-                obj = self.sub_paths.pop(i)
-                idx_original = obj['index']
-                
+        for i in reversed(range(len(self.datos_maestros))):
+            if i in self.deleted_indices: continue
+            data = self.datos_maestros[i]
+            
+            if data['bbox'].contains(click_pos) and data['path'].contains(click_pos):
+                self.deleted_indices.add(i)
                 elem = self.motor.elementos.get(self.uid)
                 if elem:
                     if 'deleted_indices' not in elem: elem['deleted_indices'] = []
-                    elem['deleted_indices'].append(idx_original)
-                    
-                self._rebuild_visual_path()
+                    elem['deleted_indices'].append(i)
+                
+                self._hornear_chunks_locales()
                 self.hovered_path = None
                 self.update() 
                 
-                caja = obj['data']['path'].boundingRect()
-                brush = obj['data']['brush']
-                
-                # Si es un color sólido sacamos el HEX, si es degradado lo dejamos en None
+                caja = data['path'].boundingRect()
+                brush = data['brush']
                 color_hex = brush.color().name() if brush.style() == Qt.BrushStyle.SolidPattern else None
-                
-                # 🚀 LA CURA: Devolvemos el Pincel (Brush) con todo el degradado intacto
                 return {
-                    'x_local': caja.x(), 
-                    'y_local': caja.y(), 
-                    'w': caja.width(), 
-                    'h': caja.height(), 
-                    'color': color_hex,
-                    'brush': brush, 
-                    'path': obj['data']['path'],
-                    'tag': obj['data'].get('tag', 'path'),
-                    'forma': obj['data'].get('forma', 'Rectángulo')
+                    'x_local': caja.x(), 'y_local': caja.y(), 'w': caja.width(), 'h': caja.height(), 
+                    'color': color_hex, 'brush': brush, 'path': data['path'],
+                    'tag': data.get('tag', 'path'), 'forma': data.get('forma', 'Rectángulo')
                 }
         return None
 
     def hoverMoveEvent(self, event):
         from PyQt6.QtCore import Qt
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-            click_pos = event.pos()
-            for obj in reversed(self.sub_paths):
-                if obj['data']['path'].contains(click_pos):
-                    if self.hovered_path != obj['data']['path']:
-                        self.hovered_path = obj['data']['path']
-                        self.update() 
-                    return
+        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            if getattr(self, 'hovered_path', None) is not None:
+                self.hovered_path = None
+                self.update()
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            super().hoverMoveEvent(event)
+            return
+
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        click_pos = event.pos()
+        
+        for i in reversed(range(len(self.datos_maestros))):
+            if i in self.deleted_indices: continue
+            data = self.datos_maestros[i]
+            if data['bbox'].contains(click_pos) and data['path'].contains(click_pos):
+                if self.hovered_path != data['path']:
+                    self.hovered_path = data['path']
+                    self.update() 
+                return
                     
         if getattr(self, 'hovered_path', None) is not None:
             self.hovered_path = None
@@ -1482,29 +1526,31 @@ class PremiumCompositeSvgItem(QGraphicsPathItem):
         super().hoverLeaveEvent(event)
 
 class PerformanceMonitor(QLabel):
-    """Overlay tipo Game Engine para medir FPS y RAM en vivo"""
-    def __init__(self, parent=None):
+    """Overlay tipo Game Engine: Telemetría Avanzada de VRAM, CPU y Cámara"""
+    def __init__(self, canvas_view, parent=None):
         super().__init__(parent)
+        self.canvas_view = canvas_view # Guardamos el lienzo para espiarlo
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        # 🚀 Tamaño fijo para que el texto siempre sea visible
-        self.setFixedSize(220, 30) 
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # 🚀 Lo hacemos más alto para que quepa toda la información
+        self.setFixedSize(280, 85) 
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setStyleSheet("""
-            background-color: rgba(18, 18, 20, 220); 
+            background-color: rgba(12, 12, 15, 230); 
             color: #00FF00; 
             font-family: 'Consolas', monospace; 
             font-size: 11px; 
-            font-weight: bold; 
+            padding: 8px;
             border-radius: 6px; 
-            border: 1px solid #2A2B31;
+            border: 1px solid #FE5934;
         """)
         self.frames = 0
         self.last_time = time.perf_counter()
-        self.setText("🖥️ Iniciando Motor...")
+        self.setText("🖥️ Iniciando Sistemas de Telemetría...")
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_stats)
-        self.timer.start(1000) # Actualizamos cada 1 segundo para mayor estabilidad
+        self.timer.start(500) # 🚀 Actualizamos cada medio segundo para ver el lag en vivo
 
     def tick(self):
         self.frames += 1
@@ -1513,16 +1559,42 @@ class PerformanceMonitor(QLabel):
         now = time.perf_counter()
         dt = now - self.last_time
         fps = self.frames / dt if dt > 0 else 0
+        
         try:
             process = psutil.Process(os.getpid())
             ram_mb = process.memory_info().rss / (1024 * 1024)
             ram_str = f"{ram_mb:.1f} MB"
         except: ram_str = "-- MB"
         
-        # Color dinámico: Verde (Pro), Naranja (Alerta), Rojo (Lag)
-        color = "#00FF00" if fps > 50 else "#FFB84D" if fps > 25 else "#FF5C5C"
-        self.setStyleSheet(f"background-color: rgba(18, 18, 20, 220); color: {color}; border-radius: 6px; border: 1px solid #2A2B31; font-family: 'Consolas'; font-weight: bold;")
-        self.setText(f"🖥️ FPS: {int(fps)} | 💾 RAM: {ram_str}")
+        # 🚀 ESPIONAJE DEL LIENZO
+        zoom = getattr(self.canvas_view, 'zoom', 1.0)
+        
+        # Calculamos cuántos elementos está viendo la cámara vs los que hay en total
+        if self.canvas_view.scene():
+            view_rect = self.canvas_view.viewport().rect()
+            scene_rect = self.canvas_view.mapToScene(view_rect).boundingRect()
+            
+            # Área matemática que Qt está intentando meter en la pantalla
+            area_w = int(scene_rect.width())
+            area_h = int(scene_rect.height())
+            
+            items_en_camara = len(self.canvas_view.scene().items(scene_rect))
+            items_totales = len(self.canvas_view.scene().items())
+        else:
+            area_w, area_h, items_en_camara, items_totales = 0, 0, 0, 0
+        
+        # Color dinámico por FPS
+        color = "#00FF00" if fps > 50 else "#FFB84D" if fps > 20 else "#FF5C5C"
+        self.setStyleSheet(f"background-color: rgba(12, 12, 15, 230); color: {color}; border-radius: 6px; border: 1px solid #FE5934; font-family: 'Consolas';")
+        
+        # 🚀 EL REPORTE COMPLETO
+        telemetria = (
+            f"🖥️ FPS: {int(fps):03d}  | 💾 RAM: {ram_str}\n"
+            f"🔍 ZOM: {zoom:.2f}x | 📦 VISIBLES: {items_en_camara}/{items_totales}\n"
+            f"📐 CÁMARA RENDER (px): {area_w} x {area_h}"
+        )
+        self.setText(telemetria)
+        
         self.frames = 0
         self.last_time = now
 
@@ -1548,22 +1620,21 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 1. LÍMITES MATEMÁTICOS DE ESCENA
         self.scene().setSceneRect(-2000, -2000, self.motor.w_pdf + 4000, self.motor.h_pdf + 4000)
 
-        # 🚀 2. BANDERAS RASTER DE MÁXIMO RENDIMIENTO (D3D11 Vía Bootloader)
+        # 🚀 2. BANDERAS RASTER DE MÁXIMO RENDIMIENTO
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        # ⚡ EL SECRETO DE LOS 60 FPS: BoundingRectViewportUpdate
+        # ⚡ VOLVEMOS AL MOTOR RASTER NATIVO (Adiós OpenGL)
+        # La CPU con BoundingRectUpdate es el rey absoluto para SVGs cacheados
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
         
         # ⚡ MEMORIA Y CACHÉ
         self.setCacheMode(QGraphicsView.CacheModeFlag.CacheBackground)
         self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
-        # ❌ (Línea de IndirectPainting eliminada, Qt6 ya lo hace por defecto)
 
         # 🚀 3. INTERACCIÓN Y CÁMARA
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
-        # 🚀 Colisión por caja matemática, evita recalcular 50,000 curvas de Bézier al arrastrar
         self.setRubberBandSelectionMode(Qt.ItemSelectionMode.IntersectsItemBoundingRect)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1595,8 +1666,9 @@ class InteractiveCanvasView(QGraphicsView):
         self.grosor_pluma_actual = 3.0
 
         # 🚀 5. MONITOR DE RENDIMIENTO
-        self.perf_monitor = PerformanceMonitor(self)
+        self.perf_monitor = PerformanceMonitor(self, self)
         self.perf_monitor.show()
+        
 
     def set_tool(self, tool_id):
         """Cambia el comportamiento del ratón según la herramienta activa"""
@@ -1648,6 +1720,7 @@ class InteractiveCanvasView(QGraphicsView):
             
         if hasattr(self, 'uid_activo') and self.uid_activo:
             self.dibujar_controles_seleccion()
+
 
     # ==========================================
     # 🚀 MOTOR MATEMÁTICO: CASCADA DE DEFORMACIONES
@@ -2043,27 +2116,73 @@ class InteractiveCanvasView(QGraphicsView):
             ruta = str(elem.get('contenido', ''))
             
             if elem.get('es_svg_complejo', False):
-                datos_geometria = self.motor.extraer_geometria_cruda(ruta)
                 
-                from PyQt6.QtGui import QPainterPath, QTransform
-                path_temp = QPainterPath()
-                for d in datos_geometria: path_temp.addPath(d['path'])
-                caja_real = path_temp.boundingRect()
+                # 👇 --- MODO INSTANCING CON CHUNKS ESPACIALES --- 👇
+                if not hasattr(self.window(), '_flyweight_cache'): 
+                    self.window()._flyweight_cache = {}
                 
-                w_svg, h_svg = float(elem.get('w', 100)), float(elem.get('h', 100))
-                
-                t_center = QTransform()
-                scale_x = w_svg / caja_real.width() if caja_real.width() > 0 else 1.0
-                scale_y = h_svg / caja_real.height() if caja_real.height() > 0 else 1.0
-                t_center.scale(scale_x, scale_y)
-                t_center.translate(-caja_real.center().x(), -caja_real.center().y())
-                
-                for d in datos_geometria:
-                    d['path'] = t_center.map(d['path'])
+                if ruta not in self.window()._flyweight_cache:
+                    datos_geometria = self.motor.extraer_geometria_cruda(ruta)
                     
-                # 🚀 INYECTAMOS EL NUEVO OBJETO PREMIUM (Cero Lag)
-                item = PremiumCompositeSvgItem(datos_geometria, uid, self.motor)
-                item.setData(998, (w_svg, h_svg))
+                    from PyQt6.QtGui import QPainterPath, QTransform, QPicture, QPainter
+                    from PyQt6.QtCore import QRectF
+                    
+                    path_temp = QPainterPath()
+                    for d in datos_geometria: path_temp.addPath(d['path'])
+                    caja_real = path_temp.boundingRect()
+                    
+                    w_svg, h_svg = float(elem.get('w', 100)), float(elem.get('h', 100))
+                    t_center = QTransform()
+                    scale_x = w_svg / caja_real.width() if caja_real.width() > 0 else 1.0
+                    scale_y = h_svg / caja_real.height() if caja_real.height() > 0 else 1.0
+                    t_center.scale(scale_x, scale_y)
+                    t_center.translate(-caja_real.center().x(), -caja_real.center().y())
+                    
+                    caja_maestra = QRectF()
+                    # 1. Transformamos todos los vectores al centro
+                    for idx, d in enumerate(datos_geometria):
+                        d['path'] = t_center.map(d['path'])
+                        d['bbox'] = d['path'].boundingRect() 
+                        d['global_idx'] = idx # Etiqueta de ADN para cada pieza
+                        caja_maestra = caja_maestra.united(d['bbox'])
+                        
+                    # 🚀 2. LA MAGIA: Agrupamos el SVG en Chunks (Bloques) de 50 vectores
+                    chunks_maestros = []
+                    tamaño_chunk = 50
+                    
+                    for i in range(0, len(datos_geometria), tamaño_chunk):
+                        chunk_datos = datos_geometria[i : i + tamaño_chunk]
+                        chunk_box = QRectF()
+                        
+                        pic = QPicture()
+                        p = QPainter(pic)
+                        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                        
+                        for d in chunk_datos:
+                            chunk_box = chunk_box.united(d['bbox'])
+                            p.setBrush(d['brush'])
+                            p.setPen(d['pen'])
+                            p.drawPath(d['path'])
+                        p.end()
+                        
+                        chunks_maestros.append({
+                            'bbox': chunk_box,
+                            'picture': pic,
+                            'datos': chunk_datos
+                        })
+                        
+                    self.window()._flyweight_cache[ruta] = {
+                        'datos': datos_geometria,  # Lista completa para el Hover
+                        'chunks': chunks_maestros, # Casetes listos para alta velocidad
+                        'caja': caja_maestra,
+                        'w': w_svg, 'h': h_svg
+                    }
+                
+                # Leemos la memoria RAM maestra
+                nucleo_compartido = self.window()._flyweight_cache[ruta]
+                item = PremiumCompositeSvgItem(nucleo_compartido, uid, self.motor)
+                item.setData(998, (nucleo_compartido['w'], nucleo_compartido['h']))
+                # 👆 --- FIN MODO INSTANCING --- 👆
             
             # 👇 🚀 LA CURA DEL BUG: Esto AHORA es un ELIF para no sobrescribir el monstruo
             elif ruta.lower().endswith('.svg'): 
@@ -2603,21 +2722,13 @@ class InteractiveCanvasView(QGraphicsView):
         mods = event.modifiers()
         delta = event.angleDelta().y()
         
-        # 1. SHIFT + Rueda = Desplazamiento Horizontal
         if mods & Qt.KeyboardModifier.ShiftModifier:
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
-            
-        # 2. ALT + Rueda = Desplazamiento Vertical
         elif mods & Qt.KeyboardModifier.AltModifier:
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta)
-            
-        # 3. Solo Rueda = ZOOM INTERACTIVO
         else:
-            # 🚀 LA CURA DEL ZOOM HACIA EL RATÓN (Matemática Absoluta)
-            # Apagamos el ancla de Qt temporalmente porque se congela con la herramienta mano
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
             
-            # Guardamos qué punto exacto del mapa (escena) estamos mirando bajo el ratón
             pos_view = event.position().toPoint() if hasattr(event, 'position') else event.pos()
             pos_scene_antes = self.mapToScene(pos_view)
 
@@ -2625,20 +2736,16 @@ class InteractiveCanvasView(QGraphicsView):
             self.scale(factor, factor)
             self.zoom *= factor
             
-            # Tras hacer zoom, el lienzo se quedó quieto y el punto se movió. Calculamos dónde quedó.
             pos_scene_despues = self.mapToScene(pos_view)
             
-            # Ajustamos las barras de desplazamiento forzando a que la pantalla siga tu puntero
             delta_x = (pos_scene_antes.x() - pos_scene_despues.x()) * self.transform().m11()
             delta_y = (pos_scene_antes.y() - pos_scene_despues.y()) * self.transform().m22()
 
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + int(delta_x))
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() + int(delta_y))
             
-            # Restauramos el ancla por seguridad interna de Qt
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
-            # Redibujamos la caja azul para que sus controles se adapten a la nueva escala
             if getattr(self, 'uid_activo', None):
                 self.dibujar_controles_seleccion()
 
@@ -3282,7 +3389,7 @@ class InteractiveCanvasView(QGraphicsView):
                     # =======================================================
 
                     # Lo marcamos para MOVER (incluso si tenemos la herramienta de texto activa)
-                    self._iniciar_memoria_arrastre(pdf_x, pdf_y) # 🚀 Memoria Absoluta
+                    self._iniciar_memoria_arrastre(pdf_x, pdf_y)
                     
                     uid_emit = self.uid_activo if self.uid_activo else ""
                     QTimer.singleShot(0, lambda u=uid_emit: self.elemento_seleccionado.emit(u))
