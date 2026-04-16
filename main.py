@@ -23,6 +23,7 @@ from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, QTimer, QPointF, QEvent
 from PyQt6.QtGui import (QIcon, QColor, QPalette, QFont, QPainter, QBrush, QPen, 
                          QLinearGradient, QPixmap, QPainterPath, QFontDatabase,
                          QTransform, QCursor, QFontMetricsF)
+from PyQt6.QtSvgWidgets import QGraphicsSvgItem
 import qtawesome as qta
 from motor_grafico import RectorOP
 from dialogs import NewDocumentDialog
@@ -1341,6 +1342,141 @@ class PremiumStrokeItem(QGraphicsPathItem):
         if self._cached_shape is not None: return self._cached_shape
         return super().shape()
 
+# ========================================================
+# 🚀 MOTOR DE RENDERIZADO VECTORIAL ABSOLUTO
+# ========================================================
+class PremiumSvgItem(QGraphicsItem):
+    """Fuerza al SVG a dibujarse exactamente centrado dentro de la caja de selección"""
+    def __init__(self, renderer, w, h):
+        super().__init__()
+        self.renderer = renderer
+        self.w_math = float(w)
+        self.h_math = float(h)
+
+    def boundingRect(self):
+        # 🚀 CURA DEL REBOTE 1: El SVG debe nacer desde su centro, no desde la esquina
+        from PyQt6.QtCore import QRectF
+        return QRectF(-self.w_math / 2.0, -self.h_math / 2.0, self.w_math, self.h_math)
+
+    def paint(self, painter, option, widget=None):
+        from PyQt6.QtGui import QPainter
+        from PyQt6.QtCore import QRectF
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Lo obligamos a estamparse en las coordenadas negativas para centrarlo
+        caja_centrada = QRectF(-self.w_math / 2.0, -self.h_math / 2.0, self.w_math, self.h_math)
+        self.renderer.render(painter, caja_centrada)
+
+class PremiumCompositeSvgItem(QGraphicsPathItem):
+    """
+    🔥 EL ESTILO COREL: 1 solo objeto en escena, pinta sus piezas con colores originales y tiene Hover.
+    """
+    def __init__(self, sub_paths_data, uid, motor, parent=None):
+        super().__init__(parent)
+        self.uid = uid
+        self.motor = motor
+        
+        elem = self.motor.elementos.get(self.uid, {})
+        self.deleted_indices = elem.get('deleted_indices', [])
+        
+        self.sub_paths = []
+        for i, data in enumerate(sub_paths_data):
+            if i not in self.deleted_indices:
+                self.sub_paths.append({'index': i, 'data': data})
+        
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.setAcceptHoverEvents(True) 
+        
+        # 🚀 ESCUDO DE RENDIMIENTO
+        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        self.hovered_path = None
+        
+        self._rebuild_visual_path()
+
+    def _rebuild_visual_path(self):
+        from PyQt6.QtGui import QPainterPath
+        path_total = QPainterPath()
+        for obj in self.sub_paths:
+            path_total.addPath(obj['data']['path'])
+        # Solo lo seteamos para la colisión del ratón, NO para pintarlo
+        self.setPath(path_total)
+
+    # 👇 🚀 LA CURA DE LOS BORDES FINOS: Bucle de pintado manual 👇
+    def paint(self, painter, option, widget=None):
+        from PyQt6.QtGui import QPainter, QColor, QPen, QBrush
+        from PyQt6.QtCore import Qt
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 1. PINTAMOS CADA PIEZA CON SU COLOR EXACTO (Adiós líneas negras)
+        for obj in self.sub_paths:
+            painter.setBrush(obj['data']['brush'])
+            painter.setPen(obj['data']['pen'])
+            painter.drawPath(obj['data']['path'])
+            
+        # 2. Capa de retroalimentación (Hover Naranja sobre la pieza específica)
+        if getattr(self, 'hovered_path', None):
+            painter.setBrush(QBrush(QColor("#FE5934"))) 
+            painter.setPen(QPen(Qt.GlobalColor.white, 2.0))
+            painter.drawPath(self.hovered_path)
+
+    def extraer_sub_forma(self, pos_scene):
+        click_pos = self.mapFromScene(pos_scene)
+        for i in reversed(range(len(self.sub_paths))):
+            if self.sub_paths[i]['data']['path'].contains(click_pos):
+                obj = self.sub_paths.pop(i)
+                idx_original = obj['index']
+                
+                elem = self.motor.elementos.get(self.uid)
+                if elem:
+                    if 'deleted_indices' not in elem: elem['deleted_indices'] = []
+                    elem['deleted_indices'].append(idx_original)
+                    
+                self._rebuild_visual_path()
+                self.hovered_path = None
+                self.update() 
+                
+                caja = obj['data']['path'].boundingRect()
+                color = obj['data']['brush'].color().name()
+                
+                # 🚀 LA CURA: Ahora devolvemos TODO el ADN de la pieza (Forma, Color y Matemática)
+                return {
+                    'x_local': caja.x(), 
+                    'y_local': caja.y(), 
+                    'w': caja.width(), 
+                    'h': caja.height(), 
+                    'color': color,
+                    'path': obj['data']['path'],
+                    'tag': obj['data'].get('tag', 'path'),
+                    'forma': obj['data'].get('forma', 'Rectángulo')
+                }
+        return None
+
+    def hoverMoveEvent(self, event):
+        from PyQt6.QtCore import Qt
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            click_pos = event.pos()
+            for obj in reversed(self.sub_paths):
+                if obj['data']['path'].contains(click_pos):
+                    if self.hovered_path != obj['data']['path']:
+                        self.hovered_path = obj['data']['path']
+                        self.update() 
+                    return
+                    
+        if getattr(self, 'hovered_path', None) is not None:
+            self.hovered_path = None
+            self.update()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        if getattr(self, 'hovered_path', None) is not None:
+            self.hovered_path = None
+            self.update()
+        super().hoverLeaveEvent(event)
+
 class PerformanceMonitor(QLabel):
     """Overlay tipo Game Engine para medir FPS y RAM en vivo"""
     def __init__(self, parent=None):
@@ -1762,9 +1898,10 @@ class InteractiveCanvasView(QGraphicsView):
                     pw, ph = pw_ph if pw_ph else (100.0, 100.0)
                     item.setOffset(-pw / 2.0, -ph / 2.0)
                     
-                    # 🚀 APLICACIÓN MATEMÁTICA JERÁRQUICA
-                    item.setTransform(self._obtener_matriz_acumulada(uid))
-                    item.setOpacity(self._obtener_opacidad_acumulada(uid))
+                # 🚀 CURA DEL REBOTE 2: Sacamos esto del 'if' para que 
+                # la matriz de movimiento aplique a los SVG también.
+                item.setTransform(self._obtener_matriz_acumulada(uid))
+                item.setOpacity(self._obtener_opacidad_acumulada(uid))
 
             elif tipo == 'Texto' and isinstance(item, QGraphicsItemGroup):
                 content_hash = (elem.get('contenido'), elem.get('w'), elem.get('fuente'), elem.get('color_tx'), elem.get('align'), elem.get('borde_color'), elem.get('borde_grosor'))
@@ -1872,8 +2009,6 @@ class InteractiveCanvasView(QGraphicsView):
                 forma, radio = elem.get('forma', 'Rectángulo'), elem.get('radio_esquinas', 0.0)
                 path = QPainterPath()
                 
-                # 🚀 LA CURA DE LA DEFORMACIÓN DEL MARCO:
-                # El Marco no debe dibujar color si no tiene uno definido explícitamente (es invisible)
                 w_real = float(caja.get('w') or 0.0) if caja else float(elem.get('w', 0.0))
                 h_real = float(caja.get('h') or 0.0) if caja else float(elem.get('h', 0.0))
                 
@@ -1884,11 +2019,15 @@ class InteractiveCanvasView(QGraphicsView):
                 else: path.addRect(ox, oy, w_real, h_real)
                 
                 item.setPath(path)
-                color_relleno, color_borde, grosor = elem.get('color_tx'), elem.get('borde_color'), elem.get('borde_grosor', 0)
+                
+                # 🚀 CURA DE LAS CAJAS INVISIBLES: Leemos color_tx O color_bg 
+                color_relleno = elem.get('color_tx') or elem.get('color_bg')
+                color_borde, grosor = elem.get('borde_color'), elem.get('borde_grosor', 0)
+                
                 item.setBrush(QBrush(QColor(color_relleno)) if color_relleno else QBrush(Qt.BrushStyle.NoBrush))
                 item.setPen(QPen(QColor(color_borde), grosor) if grosor > 0 and color_borde else QPen(Qt.PenStyle.NoPen))
                 
-                # 🚀 APLICACIÓN MATEMÁTICA JERÁRQUICA
+                # APLICACIÓN MATEMÁTICA JERÁRQUICA
                 item.setTransform(self._obtener_matriz_acumulada(uid))
                 item.setOpacity(self._obtener_opacidad_acumulada(uid))
 
@@ -1899,84 +2038,105 @@ class InteractiveCanvasView(QGraphicsView):
         if tipo == 'Foto':
             ruta = str(elem.get('contenido', ''))
             
-            if ruta.lower().endswith('.svg'):
-                # 🚀 EL ESCUDO DE DUPLICACIÓN: Caché estricto de SVG
-                color_hex = elem.get('color_tx', '')
-                cache_key = f"svg_{ruta}_{color_hex}" # DNI único del archivo
+            if elem.get('es_svg_complejo', False):
+                datos_geometria = self.motor.extraer_geometria_cruda(ruta)
                 
-                # Si ya procesamos este SVG, lo sacamos de la memoria RAM en 0.0001 segundos
-                if cache_key in self.cache_pixmaps and not self.cache_pixmaps[cache_key].isNull():
-                    pixmap = self.cache_pixmaps[cache_key]
-                    pw = pixmap.width()
-                    ph = pixmap.height()
+                from PyQt6.QtGui import QPainterPath, QTransform
+                path_temp = QPainterPath()
+                for d in datos_geometria: path_temp.addPath(d['path'])
+                caja_real = path_temp.boundingRect()
+                
+                w_svg, h_svg = float(elem.get('w', 100)), float(elem.get('h', 100))
+                
+                t_center = QTransform()
+                scale_x = w_svg / caja_real.width() if caja_real.width() > 0 else 1.0
+                scale_y = h_svg / caja_real.height() if caja_real.height() > 0 else 1.0
+                t_center.scale(scale_x, scale_y)
+                t_center.translate(-caja_real.center().x(), -caja_real.center().y())
+                
+                for d in datos_geometria:
+                    d['path'] = t_center.map(d['path'])
                     
-                    item = QGraphicsPixmapItem(pixmap)
-                    item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-                    item.setData(998, (float(pw), float(ph)))
-                    
-                # Si es la primera vez, hacemos el trabajo pesado y lo guardamos
-                else:
+                # 🚀 INYECTAMOS EL NUEVO OBJETO PREMIUM (Cero Lag)
+                item = PremiumCompositeSvgItem(datos_geometria, uid, self.motor)
+                item.setData(998, (w_svg, h_svg))
+            
+            # 👇 🚀 LA CURA DEL BUG: Esto AHORA es un ELIF para no sobrescribir el monstruo
+            elif ruta.lower().endswith('.svg'): 
+                # ========================================================
+                # 🚀 LECTOR VECTORIAL PURO CON ENCAJE PERFECTO (0 Bugs)
+                # ========================================================
+                color_hex = elem.get('color_tx', '')
+                cache_key = f"svg_renderer_{ruta}_{color_hex}"
+
+                if not hasattr(self, 'cache_renderers'):
+                    self.cache_renderers = {}
+
+                # 1. Cargamos el motor matemático (QSvgRenderer) a la memoria RAM
+                if cache_key not in self.cache_renderers:
                     from PyQt6.QtSvg import QSvgRenderer
                     from PyQt6.QtCore import QByteArray
                     import re
-                    
+
                     try:
                         with open(ruta, 'r', encoding='utf-8', errors='ignore') as f:
                             svg_data = f.read()
-                            
-                        # 🎨 COLORIZACIÓN EN TIEMPO REAL
+
                         if color_hex:
-                            svg_data = re.sub(r'fill\s*=\s*["\'][^"\']*["\']', f'fill="{color_hex}"', svg_data, flags=re.IGNORECASE)
-                            svg_data = re.sub(r'stroke\s*=\s*["\'][^"\']*["\']', f'stroke="{color_hex}"', svg_data, flags=re.IGNORECASE)
-                            svg_data = re.sub(r'fill\s*:\s*[^;"]*', f'fill:{color_hex}', svg_data, flags=re.IGNORECASE)
+                            # 🚀 LA CURA DE LOS SÓLIDOS: Colorizador Inteligente
+                            # Si el SVG dice "none" o "transparent", lo dejamos intacto.
+                            def repl_attr(m):
+                                if 'none' in m.group(2).lower() or 'transparent' in m.group(2).lower(): 
+                                    return m.group(0) 
+                                return f'{m.group(1)}{color_hex}{m.group(3)}'
+
+                            svg_data = re.sub(r'(fill\s*=\s*["\'])([^"\']+)(["\'])', repl_attr, svg_data, flags=re.IGNORECASE)
+                            svg_data = re.sub(r'(stroke\s*=\s*["\'])([^"\']+)(["\'])', repl_attr, svg_data, flags=re.IGNORECASE)
+                            
+                            def repl_css(m):
+                                if 'none' in m.group(2).lower() or 'transparent' in m.group(2).lower():
+                                    return m.group(0)
+                                return f'{m.group(1)}{color_hex}'
+                                
+                            svg_data = re.sub(r'(fill\s*:\s*)([^;"]+)', repl_css, svg_data, flags=re.IGNORECASE)
+                            svg_data = re.sub(r'(stroke\s*:\s*)([^;"]+)', repl_css, svg_data, flags=re.IGNORECASE)
 
                         byte_array = QByteArray(svg_data.encode('utf-8'))
-                        renderer = QSvgRenderer(byte_array)
-                        
-                        def_w = max(1, renderer.defaultSize().width())
-                        def_h = max(1, renderer.defaultSize().height())
-                        ratio = def_w / def_h
-                        
-                        w_lienzo = float(elem.get('w', 300))
-                        target_w = max(w_lienzo * 3.0, 1500.0) 
-                        target_w = min(target_w, 3500.0) # Límite de seguridad de VRAM
-                        
-                        pw = int(target_w)
-                        ph = int(target_w / ratio)
-                        
-                        pixmap = QPixmap(pw, ph)
-                        pixmap.fill(Qt.GlobalColor.transparent)
-                        
-                        painter = QPainter(pixmap)
-                        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-                        renderer.render(painter)
-                        painter.end()
-                        
-                        # 🚀 GUARDAMOS LA IMAGEN HD EN LA CACHÉ MAESTRA
-                        self.cache_pixmaps[cache_key] = pixmap
-                        
-                        item = QGraphicsPixmapItem(pixmap)
-                        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-                        item.setData(998, (float(pw), float(ph))) 
+                        self.cache_renderers[cache_key] = QSvgRenderer(byte_array)
                     except Exception as e:
-                        print(f"Error Híbrido SVG: {e}")
-                        item = QGraphicsPixmapItem()
+                        print(f"Error SVG Vectorial: {e}")
+
+                # 2. Obtenemos las matemáticas exactas que dicta tu motor interno
+                w_math = float(elem.get('w', 100))
+                h_math = float(elem.get('h', 100))
+
+                # 3. 🚀 INYECTAMOS NUESTRO ITEM SUPREMO EN LUGAR DEL DE QT
+                if cache_key in self.cache_renderers:
+                    renderer = self.cache_renderers[cache_key]
+                    item = PremiumSvgItem(renderer, w_math, h_math)
+                else:
+                    item = QGraphicsPixmapItem() # Fallback de seguridad en caso de error
+
+                # 4. Físicas para el comportamiento de arrastre e interfaz (Cura el efecto liga)
+                item.setData(998, (w_math, h_math))
+                    
             else:
-                # JPG o PNG normal
+                # ========================================================
+                # 🖼️ LECTOR DE IMÁGENES NORMALES (JPG, PNG) - SE MANTIENE INTACTO
+                # ========================================================
                 item = QGraphicsPixmapItem()
                 item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
                 if ruta and os.path.exists(ruta):
                     if ruta not in self.cache_pixmaps:
+                        from PyQt6.QtGui import QPixmap
                         pix = QPixmap(ruta)
                         if not pix.isNull():
                             self.cache_pixmaps[ruta] = pix
                             
-                    # 🚀 LA CURA DEL UNDO: Si la foto está en la memoria RAM, 
-                    # debemos estamparla obligatoriamente en el ítem que acabamos de revivir.
                     if ruta in self.cache_pixmaps and not self.cache_pixmaps[ruta].isNull():
-                        item.setPixmap(self.cache_pixmaps[ruta])
-                        item.setData(998, (float(self.cache_pixmaps[ruta].width()), float(self.cache_pixmaps[ruta].height())))
+                        pixmap_cache = self.cache_pixmaps[ruta]
+                        item.setPixmap(pixmap_cache)
+                        item.setData(998, (float(pixmap_cache.width()), float(pixmap_cache.height())))
                 
         elif tipo == 'Texto':
             item = QGraphicsItemGroup()
@@ -1996,16 +2156,16 @@ class InteractiveCanvasView(QGraphicsView):
         
         item.setData(100, uid)
         
-        # 🚀 LA MAGIA DE LA VELOCIDAD: Hardware Caching Local
+        # 🚀 LA MAGIA DE LA VELOCIDAD VECTORIAL (Cura del pixelado)
         es_svg = tipo == 'Foto' and str(elem.get('contenido', '')).lower().endswith('.svg')
         es_texto = tipo == 'Texto'
         es_trazo = tipo == 'Trazo'
+        es_forma = tipo in ['Forma', 'Marco'] 
         
-        # 🚀 AÑADIMOS EL TRAZO PARA QUE SE COMPORTE COMO UNA FOTO AL MOVERSE
-        if es_svg or es_texto or es_trazo:
-            # ItemCoordinateCache aísla la figura en una textura pequeña (BBox real)
-            # Esto permite hacer zoom y mover a 60 FPS sin recalcular matemáticas.
-            item.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
+        if es_svg or es_texto or es_trazo or es_forma:
+            # 🚀 DeviceCoordinateCache: Obliga a Qt a recalcular las matemáticas en vivo 
+            # cuando haces zoom. ¡Tus SVGs serán filos de navaja infinitos!
+            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         else:
             item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
 
@@ -2995,6 +3155,90 @@ class InteractiveCanvasView(QGraphicsView):
             
             if uid_encontrado:
                 elem = self.motor.elementos.get(uid_encontrado)
+
+                # 👇 --- MOTOR DE EXTRACCIÓN INTELIGENTE V4 --- 👇
+                if elem and elem.get('es_svg_complejo') and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                    item_visual = self.items_ui.get(uid_encontrado)
+                    if hasattr(item_visual, 'extraer_sub_forma'):
+                        self.motor.registrar_punto_historial()
+
+                        datos_pieza = item_visual.extraer_sub_forma(pos_scene)
+                        if datos_pieza:
+                            # 1. Recuperamos la geometría exacta
+                            from PyQt6.QtCore import QRectF, QSize
+                            import tempfile
+                            
+                            caja_local = QRectF(datos_pieza['x_local'], datos_pieza['y_local'], datos_pieza['w'], datos_pieza['h'])
+                            caja_scene = item_visual.mapToScene(caja_local).boundingRect()
+                            pdf_cx, pdf_cy = self.motor.ui_a_pdf(caja_scene.center().x(), caja_scene.center().y(), 1.0)
+                            
+                            # 🚀 Seguro matemático: Evita cajas con tamaño cero
+                            w_real = max(0.5, caja_scene.width())
+                            h_real = max(0.5, caja_scene.height())
+
+                            # 2. DECISIÓN DE TIPO
+                            tipo_final = 'Forma'
+                            forma_final = datos_pieza.get('forma', 'Rectángulo')
+                            contenido_final = ''
+                            color_pieza = datos_pieza['color']
+                            
+                            if datos_pieza.get('tag') == 'path':
+                                tipo_final = 'Foto'
+                                ruta_temp = os.path.join(tempfile.gettempdir(), f"part_{int(time.time()*1000)}.svg")
+                                
+                                # 🚀 LA CURA REAL: Generador nativo de SVG en lugar de escribirlo a mano
+                                from PyQt6.QtSvg import QSvgGenerator
+                                from PyQt6.QtGui import QPainter, QBrush, QColor
+                                
+                                path_extraido = datos_pieza['path']
+                                caja_path = path_extraido.boundingRect()
+                                path_normalizado = path_extraido.translated(-caja_path.x(), -caja_path.y())
+                                
+                                gen_w = max(1, int(caja_path.width()))
+                                gen_h = max(1, int(caja_path.height()))
+                                
+                                generator = QSvgGenerator()
+                                generator.setFileName(ruta_temp)
+                                generator.setSize(QSize(gen_w, gen_h))
+                                generator.setViewBox(QRectF(0, 0, caja_path.width(), caja_path.height()))
+                                
+                                painter = QPainter(generator)
+                                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                                painter.setBrush(QBrush(QColor(color_pieza)))
+                                painter.setPen(Qt.PenStyle.NoPen)
+                                painter.drawPath(path_normalizado)
+                                painter.end()
+                                
+                                contenido_final = ruta_temp
+                            
+                            # 3. CREACIÓN EN EL MOTOR (¡Con el color_tx para que se vea!)
+                            nuevo_uid = f"ext_{int(time.time() * 1000)}"
+                            self.motor.agregar_elemento(
+                                nuevo_uid, tipo_final,
+                                forma=forma_final,
+                                contenido=contenido_final,
+                                x=pdf_cx - (w_real / 2.0), y=pdf_cy - (h_real / 2.0), 
+                                w=w_real, h=h_real,
+                                color_tx=color_pieza, # 🚀 Esta es la llave mágica de la visibilidad
+                                borde_grosor=0,
+                                z_index=elem.get('z_index', 0) + 1,
+                                parent_marco=elem.get('parent_marco')
+                            )
+
+                            # 4. Refrescar UI
+                            self.scene().clearSelection()
+                            self.uids_seleccionados = [nuevo_uid]
+                            self.uid_activo = nuevo_uid
+                            self.sincronizar_con_motor()
+                            self.dibujar_controles_seleccion()
+                            self.elemento_seleccionado.emit(nuevo_uid)
+                            self.lienzo_modificado.emit()
+                            if hasattr(self.parent_panel, 'window'): self.parent_panel.window()._refrescar_panel_capas()
+
+                    event.accept()
+                    return
+                # 👆 --------------------------------------------------------- 👆
+
                 if elem and not elem.get('bloqueado', False) and not elem.get('oculto', False):
                     self.motor.registrar_punto_historial()
                     uid_seleccion = elem.get('parent_marco') if elem.get('parent_marco') in self.motor.elementos else uid_encontrado
@@ -5758,16 +6002,15 @@ class MainDesignStudio(QMainWindow):
         
         if rutas:
             self.motor.registrar_punto_historial()
-
-            # 🚀 INICIO DE CARGA: Bloqueamos interfaz y mostramos reloj
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             
             try:
                 nuevos_uids = []
                 for ruta in rutas:
-                    # 👇 A PARTIR DE AQUÍ TODO ESTO VA DENTRO DEL FOR (indentado a la derecha) 👇
                     uid = f"img_{int(time.time() * 1000)}_{len(nuevos_uids)}"
                     w, h = 200, 200
+                    nombre_limpio = os.path.basename(ruta)
+                    
                     if ruta.lower().endswith('.svg'):
                         import xml.etree.ElementTree as ET
                         ratio = 1.0
@@ -5777,15 +6020,29 @@ class MainDesignStudio(QMainWindow):
                             vb = root.attrib.get('viewBox')
                             if vb:
                                 parts = vb.replace(',', ' ').split()
-                                if len(parts) >= 4:
-                                    ratio = float(parts[3]) / float(parts[2])
+                                if len(parts) >= 4: ratio = float(parts[3]) / float(parts[2])
                             else:
                                 vw = root.attrib.get('width', '100').replace('px','').replace('%','')
                                 vh = root.attrib.get('height', '100').replace('px','').replace('%','')
                                 ratio = float(vh) / float(vw)
                         except: pass
-                        w = 300
-                        h = 300 * ratio
+                        
+                        w, h = 300, 300 * ratio
+                        cx = self.motor.w_pdf / 2.0 - (w/2.0)
+                        cy = self.motor.h_pdf / 2.0 - (h/2.0)
+
+                        # 🚀 EL EMBUDO INTELIGENTE
+                        datos_crudos = self.motor.extraer_geometria_cruda(ruta)
+                        nombre_limpio = os.path.basename(ruta)
+                        
+                        # Si nuestro extractor logró sacar piezas (ej. Cuadros del QR)
+                        if len(datos_crudos) > 0:
+                            self.motor.agregar_elemento(uid, 'Foto', contenido=ruta, x=cx, y=cy, w=w, h=h, nombre_capa=nombre_limpio, es_svg_complejo=True)
+                            print(f"⚡ SVG Importado en Modo Optimizado Corel ({len(datos_crudos)} piezas).")
+                        else:
+                            # Si es un SVG hecho de curvas complejas, usa el renderizador de alta fidelidad estándar de Qt
+                            self.motor.agregar_elemento(uid, 'Foto', contenido=ruta, x=cx, y=cy, w=w, h=h, nombre_capa=nombre_limpio, es_svg_complejo=False)
+                            print(f"🖼️ SVG Importado en Modo Estándar.")
                     else:
                         try:
                             with Image.open(ruta) as img:
@@ -5794,14 +6051,11 @@ class MainDesignStudio(QMainWindow):
                                     ratio = min(600/w, 600/h)
                                     w, h = w * ratio, h * ratio
                         except: pass
+                        cx = self.motor.w_pdf / 2.0 - (w/2.0)
+                        cy = self.motor.h_pdf / 2.0 - (h/2.0)
+                        self.motor.agregar_elemento(uid, 'Foto', contenido=ruta, x=cx, y=cy, w=w, h=h, nombre_capa=nombre_limpio)
                     
-                    cx = self.motor.w_pdf / 2.0 - (w/2.0)
-                    cy = self.motor.h_pdf / 2.0 - (h/2.0)
-                    
-                    nombre_limpio = os.path.basename(ruta)
-                    self.motor.agregar_elemento(uid, 'Foto', contenido=ruta, x=cx, y=cy, w=w, h=h, nombre_capa=nombre_limpio)
                     nuevos_uids.append(uid)
-                # 👆 HASTA AQUÍ TERMINA EL FOR 👆
             
                 if nuevos_uids:
                     self.canvas_view_actual.uids_seleccionados = nuevos_uids
@@ -5812,7 +6066,6 @@ class MainDesignStudio(QMainWindow):
                     self.al_seleccionar_elemento(self.canvas_view_actual.uid_activo)
                     
             finally:
-                # 🚀 FIN DE CARGA: Aseguramos que el cursor vuelva a la normalidad
                 QApplication.restoreOverrideCursor()
     
     def seleccionar_desde_capas(self, uid, multi=False):

@@ -263,7 +263,7 @@ class RectorOP:
             'w': float(kwargs.get('w', 24.0)),  # Tamaño fuente o ancho
             'h': float(kwargs.get('h', 100.0)), # Alto imagen
             'contenido': kwargs.get('contenido', ''),
-            'color_tx': kwargs.get('color_tx', '#000000' if tipo in ['Texto', 'Forma', 'Código QR'] else None),
+            'color_tx': kwargs.get('color_tx', '#000000' if tipo in ['Texto', 'Código QR'] else None),
             'fuente': kwargs.get('fuente', 'Helvetica'),
             'align': kwargs.get('align', 'Centrado'),
             'interlineado': float(kwargs.get('interlineado', 1.2)),
@@ -283,7 +283,9 @@ class RectorOP:
             'color_fin': kwargs.get('color_fin', '#FFFFFF'),      # Segundo color del degradado
             'gradiente_angulo': float(kwargs.get('gradiente_angulo', 0)), # 0 = Horizontal, 90 = Vertical
             'radio_esquinas': float(kwargs.get('radio_esquinas', 0.0)),
-            'puntos': kwargs.get('puntos', []), # Lista de [x, y] para dibujar a mano libre o polígonos
+            'puntos': kwargs.get('puntos', []),
+            'es_svg_complejo': kwargs.get('es_svg_complejo', False),
+            'deleted_indices': kwargs.get('deleted_indices', []) # Lista de [x, y] para dibujar a mano libre o polígonos
         }
         self.elementos[uid] = elemento
 
@@ -706,243 +708,250 @@ class RectorOP:
     # ==========================================
     def desagrupar_svg(self, uid):
         """
-        🚀 SMART UNGROUP: FUSIÓN POR COLOR (La versión invencible)
-        Separa el SVG únicamente en capas de color sólido usando Multihilo. 
-        Mantiene los 60 FPS porque Qt solo mueve 2 o 3 capas grandes en lugar de miles.
+        🚀 COMPILADOR VECTORIAL SUPREMO (Zero-Bug Architecture)
+        - Diccionario O(1) para velocidad instantánea.
+        - Matriz Translate(-x,-y) para alinear cajas a 0,0.
+        - Nativización de <use> a color_bg.
+        - 🛡️ Escudos IsInstance para evadir comentarios C++ de Illustrator.
         """
         try:
             from lxml import etree as ET
-            import concurrent.futures
-            import copy
+            from PyQt6.QtSvg import QSvgRenderer
+            from PyQt6.QtCore import QByteArray
+            from PyQt6.QtWidgets import QApplication
             import tempfile
             import os
             import time
-            import fitz
-            from PIL import Image
         except ImportError:
             return False
 
         if uid not in self.elementos: return False
         elem = self.elementos[uid]
-        ruta_original = elem['contenido']
+        ruta_original = elem.get('contenido', '')
 
         if not str(ruta_original).lower().endswith('.svg') or not os.path.exists(ruta_original):
             return False
 
-        try:
-            parser = ET.XMLParser(remove_blank_text=True, recover=True)
-            tree = ET.parse(ruta_original, parser)
-            root = tree.getroot()
-        except: return False
-
-        # 🛡️ EL SELLO ANTI-FISURAS GLOBAL: Evita las rayitas blancas
-        root.set('shape-rendering', 'crispEdges')
+        parser = ET.XMLParser(remove_blank_text=True, recover=True)
+        tree = ET.parse(ruta_original, parser)
+        root = tree.getroot()
 
         viewbox = root.get('viewBox', f"0 0 {elem['w']} {elem['h']}")
         vb_parts = viewbox.replace(',', ' ').split()
         if len(vb_parts) == 4: vb_min_x, vb_min_y, vb_w, vb_h = map(float, vb_parts)
         else: vb_min_x, vb_min_y, vb_w, vb_h = 0.0, 0.0, float(elem['w']), float(elem['h'])
 
-        etiquetas_visuales = ['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line']
-        
+        etiquetas_visuales = ['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'use']
+
         def esta_protegido(nodo):
             p = nodo.getparent()
             while p is not None:
-                if p.tag.split('}')[-1] in ['defs', 'clipPath', 'mask', 'pattern']: return True
+                # 🛡️ ESCUDO 1: Ignorar padres que sean comentarios C++
+                if isinstance(p.tag, str):
+                    tag = p.tag.split('}')[-1]
+                    if tag in ['defs', 'clipPath', 'mask', 'pattern']: return True
                 p = p.getparent()
             return False
 
         # ==========================================
-        # 1. CLASIFICAR POR COLOR EN LA MEMORIA RAM
+        # 🚀 1. DICCIONARIO O(1)
         # ==========================================
-        grupos_por_color = {} 
-        uid_counter = 0
-        
+        diccionario_ids = {}
         for nodo in root.iter():
+            # 🛡️ ESCUDO 2: Ignorar nodos fantasma
+            if not isinstance(nodo.tag, str): continue
+            nid = nodo.get('id')
+            if nid: diccionario_ids[nid] = nodo
+
+        nodos_visuales = []
+        uid_counter = 0
+
+        for nodo in root.iter():
+            # 🛡️ ESCUDO 3: LA CURA DEL CRASH PRINCIPAL
+            if not isinstance(nodo.tag, str): continue
+            
             tag_name = nodo.tag.split('}')[-1]
             if tag_name in etiquetas_visuales and not esta_protegido(nodo):
-                nodo.set('data-extract-id', str(uid_counter))
-                
-                color = nodo.get('fill') or nodo.get('stroke') or '#000000'
-                if color == 'none': color = nodo.get('stroke') or '#000000'
-                
-                # 🚀 Sello anti-fisuras para cada pieza interna
-                nodo.set('stroke', color)
-                nodo.set('stroke-width', '0.5')
-                nodo.set('shape-rendering', 'crispEdges')
-                
-                if color not in grupos_por_color: grupos_por_color[color] = []
-                grupos_por_color[color].append(str(uid_counter))
+                id_str = f"corel_pieza_{uid_counter}"
+                nodo.set('id', id_str)
+                diccionario_ids[id_str] = nodo 
+
+                color = nodo.get('fill')
+                if not color or color == 'inherit':
+                    p = nodo.getparent()
+                    while p is not None:
+                        color = p.get('fill')
+                        if color and color != 'inherit': break
+                        p = p.getparent()
+
+                if not color or color == 'none':
+                    color = nodo.get('stroke') or '#000000'
+
+                nodos_visuales.append({
+                    'nodo': nodo, 'id': id_str, 'tag': tag_name,
+                    'color': color, 'idx': uid_counter
+                })
                 uid_counter += 1
 
-        if not grupos_por_color: return False
-
-        id_grupo_master = f"svg_colores_{int(time.time()*1000)}"
-        max_z = max([e.get('z_index', 0) for e in self.elementos.values()] or [0])
+        if not nodos_visuales: return False
 
         # ==========================================
-        # 2. HILOS PARA EXTRAER CADA CAPA DE COLOR
+        # 2. MEDICIÓN ESPACIAL C++
         # ==========================================
-        def worker_extraer_color(color_base, lista_ids, idx):
+        svg_bytes = ET.tostring(root, encoding='utf-8')
+        renderer = QSvgRenderer(QByteArray(svg_bytes))
+
+        medidas_matematicas = {}
+        matrices_transformacion = {}
+        
+        for item in nodos_visuales:
+            id_str = item['id']
+            rect_local = renderer.boundsOnElement(id_str)
             try:
-                cloned_tree = copy.deepcopy(tree)
-                cloned_root = cloned_tree.getroot()
-                
-                ancestros_seguros = set()
-                nodos_sobrevivientes = []
-                
-                # Buscamos solo las piezas que comparten este color
-                for target_id in lista_ids:
-                    nodos = cloned_root.xpath(f"//*[@data-extract-id='{target_id}']")
-                    if nodos:
-                        nodo = nodos[0]
-                        nodos_sobrevivientes.append(nodo)
-                        curr = nodo.getparent()
-                        while curr is not None:
-                            ancestros_seguros.add(curr)
-                            curr = curr.getparent()
-                
-                # Destruimos todo lo que sea de otro color
-                nodos_a_eliminar = []
-                for nodo in cloned_root.iter():
-                    if nodo.tag.split('}')[-1] in etiquetas_visuales:
-                        if nodo not in nodos_sobrevivientes and nodo not in ancestros_seguros and not esta_protegido(nodo):
-                            nodos_a_eliminar.append(nodo)
-
-                for nodo in nodos_a_eliminar:
-                    if nodo.getparent() is not None:
-                        nodo.getparent().remove(nodo)
-
-                for nodo in nodos_sobrevivientes:
-                    if 'data-extract-id' in nodo.attrib:
-                        del nodo.attrib['data-extract-id']
-
-                svg_content = ET.tostring(cloned_root, encoding='unicode')
-                ruta_temp = os.path.join(tempfile.gettempdir(), f"{id_grupo_master}_color_{idx}.svg")
-                with open(ruta_temp, 'w', encoding='utf-8') as f:
-                    if not svg_content.strip().startswith('<?xml'):
-                        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-                    f.write(svg_content)
-
-                # PyMuPDF para medir la caja delimitadora del color con precisión láser
-                tree_temp = ET.parse(ruta_temp)
-                root_temp = tree_temp.getroot()
-                root_temp.attrib['width'] = "1000"
-                root_temp.attrib['height'] = "1000"
-                root_temp.attrib['preserveAspectRatio'] = "none"
-                tree_temp.write(ruta_temp, encoding='utf-8', xml_declaration=True)
-
-                doc_temp = fitz.open(ruta_temp)
-                pix = doc_temp[0].get_pixmap(alpha=True, dpi=72)
-                doc_temp.close()
-                
-                img_temp = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
-                bbox = img_temp.getbbox()
-                
-                return {
-                    'idx': idx, 'color_base': color_base, 'ruta_temp': ruta_temp, 
-                    'bbox': bbox, 'pix_w': pix.width, 'pix_h': pix.height
-                }
-            except Exception as e:
-                print(f"Error procesando color {color_base}: {e}")
-                return None
-
-        # Desatamos todo el poder del procesador
-        resultados = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futuros = []
-            idx = 0
-            for color_base, lista_ids in grupos_por_color.items():
-                futuros.append(executor.submit(worker_extraer_color, color_base, lista_ids, idx))
-                idx += 1
-                
-            for futuro in concurrent.futures.as_completed(futuros):
-                res = futuro.result()
-                if res: resultados.append(res)
-
-        if not resultados: return False
+                matrix = renderer.matrixForElement(id_str)
+                rect_global = matrix.mapRect(rect_local)
+                medidas_matematicas[id_str] = (rect_global.x(), rect_global.y(), rect_global.width(), rect_global.height())
+                matrices_transformacion[id_str] = matrix
+            except Exception:
+                medidas_matematicas[id_str] = (rect_local.x(), rect_local.y(), rect_local.width(), rect_local.height())
+                matrices_transformacion[id_str] = None
 
         # ==========================================
-        # 3. REENSAMBLAJE EN EL LIENZO
+        # 3. CONSTRUCCIÓN DE LA BASE (DEFS)
         # ==========================================
+        for item in nodos_visuales:
+            nodo = item['nodo']
+            if nodo.getparent() is not None:
+                nodo.getparent().remove(nodo)
+
+        defs_strings = "".join([ET.tostring(child, encoding='utf-8').decode('utf-8') for child in root if isinstance(child.tag, str)])
+
+        id_grupo_master = f"svg_descompuesto_{int(time.time()*1000)}"
+        max_z = max([e.get('z_index', 0) for e in self.elementos.values()] or [0])
         caja_orig = self.obtener_caja_elemento(uid) if hasattr(self, 'obtener_caja_elemento') else elem
         if not caja_orig: caja_orig = elem
-        
-        # El Grupo Padre
+
         self.agregar_elemento(
-            id_grupo_master, "Marco", 
-            x=caja_orig['x'], y=caja_orig['y'], w=caja_orig['w'], h=caja_orig['h'],
-            nombre_capa=f"SVG ({len(resultados)} Colores)", borde_grosor=0, color_tx=None
+            id_grupo_master, "Marco", x=caja_orig['x'], y=caja_orig['y'], w=caja_orig['w'], h=caja_orig['h'],
+            nombre_capa=f"Grupo SVG", borde_grosor=0, color_tx=None,
+            rotacion=elem.get('rotacion', 0.0), rot_3d_x=elem.get('rot_3d_x', 0.0),
+            rot_3d_y=elem.get('rot_3d_y', 0.0), perspectiva=elem.get('perspectiva', [[0,0],[0,0],[0,0],[0,0]])
         )
+
+        escala_global_x = elem['w'] / vb_w if vb_w > 0 else 1.0
+        escala_global_y = elem['h'] / vb_h if vb_h > 0 else 1.0
+
         
-        nuevos_uids = []
-        for res in resultados:
-            bbox = res['bbox']
-            if not bbox: continue
-            
-            left_px, top_px, right_px, bottom_px = bbox
-            margen_x = (right_px - left_px) * 0.04
-            margen_y = (bottom_px - top_px) * 0.04
-            left_px = max(0, left_px - margen_x)
-            top_px = max(0, top_px - margen_y)
-            right_px = min(res['pix_w'], right_px + margen_x)
-            bottom_px = min(res['pix_h'], bottom_px + margen_y)
-            
-            scale_x_units = vb_w / 1000.0
-            scale_y_units = vb_h / 1000.0
-            
-            new_vb_x = vb_min_x + (left_px * scale_x_units)
-            new_vb_y = vb_min_y + (top_px * scale_y_units)
-            new_vb_w = (right_px - left_px) * scale_x_units
-            new_vb_h = (bottom_px - top_px) * scale_y_units
-            
-            tree_temp = ET.parse(res['ruta_temp'])
-            root_temp = tree_temp.getroot()
-            root_temp.attrib['viewBox'] = f"{new_vb_x} {new_vb_y} {new_vb_w} {new_vb_h}"
-            root_temp.attrib['width'] = str(new_vb_w)
-            root_temp.attrib['height'] = str(new_vb_h)
-            if 'preserveAspectRatio' in root_temp.attrib: del root_temp.attrib['preserveAspectRatio']
-            tree_temp.write(res['ruta_temp'], encoding='utf-8', xml_declaration=True)
 
-            escala_global_x = elem['w'] / vb_w
-            escala_global_y = elem['h'] / vb_h
+        # ==========================================
+        # 🧠 INTERCEPTOR O(1) (ESTRICTO)
+        # ==========================================
+        def es_forma_nativa(nodo, tag_name):
+            # 🚀 LA CURA DE LOS DIENTES DE SIERRA: NUNCA convertimos líneas o polígonos en cajas.
+            # Los trazos complejos DEBEN conservar su etiqueta <path> o <polyline> 
+            # para que el motor dibuje la matemática exacta y no un cuadrado bounding-box.
+            if tag_name == 'rect': return True, 'rectangulo'
+            if tag_name in ['circle', 'ellipse']: return True, 'elipse'
+            if tag_name == 'use':
+                href = nodo.get('{http://www.w3.org/1999/xlink}href') or nodo.get('href')
+                if href and href.startswith('#'):
+                    target = diccionario_ids.get(href[1:])
+                    if target is not None and isinstance(target.tag, str):
+                        t_tag = target.tag.split('}')[-1]
+                        if t_tag in ['rect', 'circle', 'ellipse']:
+                            return True, 'rectangulo' if t_tag == 'rect' else 'elipse'
+            return False, ''
+
+        # ==========================================
+        # 4. REENSAMBLAJE ANTI-BRINCOS (Con Gravedad Corregida)
+        # ==========================================
+        for idx_bucle, item in enumerate(nodos_visuales):
             
-            final_w = new_vb_w * escala_global_x
-            final_h = new_vb_h * escala_global_y
-            final_x = elem['x'] + ((new_vb_x - vb_min_x) * escala_global_x)
-            final_y = (elem['y'] + elem['h']) - ((new_vb_y - vb_min_y) * escala_global_y) - final_h
+            if idx_bucle % 300 == 0: QApplication.processEvents() 
+
+            id_str = item['id']
+            tag = item['tag']
+            color_base = item['color']
+            bx, by, bw, bh = medidas_matematicas[id_str]
+            matrix = matrices_transformacion[id_str]
+
+            if bw <= 0.01 or bh <= 0.01: continue
+
+            v_bx = bx - (bw * 0.005)
+            v_by = by - (bh * 0.005)
+            v_bw = bw + (bw * 0.01)
+            v_bh = bh + (bh * 0.01)
+
+            final_w = v_bw * escala_global_x
+            final_h = v_bh * escala_global_y
+            final_x = elem['x'] + ((v_bx - vb_min_x) * escala_global_x)
             
+            # 🚀 LA GRAVEDAD CORREGIDA ESTÁ AQUÍ
+            final_y = (elem['y'] + elem['h']) - ((v_by - vb_min_y) * escala_global_y) - final_h
+
             nuevo_elem = elem.copy()
-            angulo = float(elem.get('rotacion', 0.0))
-            if angulo != 0.0:
-                import math
-                cx_orig, cy_orig = elem['x'] + (elem['w']/2.0), elem['y'] + (elem['h']/2.0)
-                cx_piece, cy_piece = final_x + (final_w/2.0), final_y + (final_h/2.0)
-                rad = math.radians(angulo)
-                cx_final = cx_orig + (cx_piece - cx_orig) * math.cos(rad) - (cy_piece - cy_orig) * math.sin(rad)
-                cy_final = cy_orig + (cx_piece - cx_orig) * math.sin(rad) + (cy_piece - cy_orig) * math.cos(rad)
-                nuevo_elem['x'], nuevo_elem['y'] = cx_final - (final_w/2.0), cy_final - (final_h/2.0)
-            else:
-                nuevo_elem['x'], nuevo_elem['y'] = final_x, final_y
-                
+            nuevo_elem['x'], nuevo_elem['y'] = final_x, final_y
             nuevo_elem['w'], nuevo_elem['h'] = final_w, final_h
-            nuevo_elem['contenido'] = res['ruta_temp'] 
-            nuevo_elem['z_index'] = max_z + 1 + res['idx']
-            nuevo_elem['tipo'] = 'Foto' 
-            nuevo_elem['color_tx'] = res['color_base'] if str(res['color_base']).startswith('#') else None
-            # 🚀 El nombre de la capa en el UI será el color
-            nuevo_elem['nombre_capa'] = f"Capa {res['color_base']}"
+            nuevo_elem['z_index'] = max_z + 1 + item['idx']
+            nuevo_elem['rotacion'] = 0.0
+            nuevo_elem['rot_3d_x'] = 0.0
+            nuevo_elem['rot_3d_y'] = 0.0
+            nuevo_elem['perspectiva'] = [[0,0],[0,0],[0,0],[0,0]]
 
-            for t in ['tight_w_ratio', 'tight_h_ratio', 'tight_dx_ratio', 'tight_dy_ratio']:
+            for t in ['tight_w_ratio', 'tight_h_ratio', 'tight_dx_ratio', 'tight_dy_ratio', 'contenido']:
                 if t in nuevo_elem: del nuevo_elem[t]
 
-            nuevo_uid = f"{uid}_color_{res['idx']}"
+            se_puede_nativizar, tipo_forma = es_forma_nativa(item['nodo'], tag)
+
+            if se_puede_nativizar:
+                nuevo_elem['tipo'] = 'Forma'
+                nuevo_elem['forma'] = tipo_forma
+                nuevo_elem['color_bg'] = color_base 
+                nuevo_elem['color_tx'] = None 
+                nuevo_elem['borde_grosor'] = 0 
+                nuevo_elem['nombre_capa'] = f"Vector {color_base}"
+            else:
+                m_str = f"matrix({matrix.m11()} {matrix.m12()} {matrix.m21()} {matrix.m22()} {matrix.dx()} {matrix.dy()})" if matrix else ""
+                nodo_str = ET.tostring(item['nodo'], encoding='utf-8').decode('utf-8')
+                
+                final_svg_str = f"""<?xml version="1.0" encoding="UTF-8"?>
+                <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{v_bw}" height="{v_bh}" viewBox="0 0 {v_bw} {v_bh}">
+                    {defs_strings}
+                    <g transform="translate({-v_bx}, {-v_by})">
+                        <g transform="{m_str}">
+                            {nodo_str}
+                        </g>
+                    </g>
+                </svg>"""
+
+                ruta_temp = os.path.join(tempfile.gettempdir(), f"{id_grupo_master}_pieza_{item['idx']}.svg")
+                with open(ruta_temp, 'w', encoding='utf-8') as f:
+                    f.write(final_svg_str)
+
+                nuevo_elem['tipo'] = 'Foto'
+                nuevo_elem['contenido'] = ruta_temp
+                nuevo_elem['color_tx'] = color_base if str(color_base).startswith('#') else None
+                nuevo_elem['nombre_capa'] = f"{tag.capitalize()} {color_base}"
+
+            nuevo_uid = f"{uid}_pieza_{item['idx']}"
             self.elementos[nuevo_uid] = nuevo_elem
             self.insertar_en_marco(nuevo_uid, id_grupo_master)
-            nuevos_uids.append(nuevo_uid)
 
         self.eliminar_elemento(uid)
         return id_grupo_master
+
+    def extraer_geometria_cruda(self, ruta_svg):
+        """
+        🧠 Invoca al compilador externo para transformar el SVG en matemáticas de Qt.
+        """
+        try:
+            # Importamos nuestro nuevo archivo parser
+            from vectify_svg import VectifySVGParser
+            compilador = VectifySVGParser(ruta_svg)
+            return compilador.parsear()
+        except Exception as e:
+            print(f"⚠️ Fallo al extraer SVG con el nuevo compilador: {e}")
+            return []
 
     # ==========================================
     # FUNCIONES SEGURAS PARA LA INTERFAZ (UI)
