@@ -97,6 +97,12 @@ class RectorOP:
         if '_qt_advances' in clon: 
             clon['_qt_advances'] = clon['_qt_advances'][:]
             
+        # =======================================================
+        # 🚀 LA PIEZA FALTANTE: Aislar los recortes del Flyweight
+        # =======================================================
+        if 'deleted_indices' in clon:
+            clon['deleted_indices'] = clon['deleted_indices'][:]
+            
         return clon
 
     def registrar_punto_historial(self, uids_afectados=None):
