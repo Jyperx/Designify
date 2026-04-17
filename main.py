@@ -1620,6 +1620,11 @@ class InteractiveCanvasView(QGraphicsView):
         self.parent_panel = parent_panel
         self.mapa_fuentes = mapa_fuentes
         self.zoom = 1.0
+
+        self.is_zooming = False
+        self.zoom_timer = QTimer(self)
+        self.zoom_timer.setSingleShot(True)
+        self.zoom_timer.timeout.connect(self._terminar_zoom)
         
         self.uids_seleccionados = [] 
         self.uid_activo = None       
@@ -2732,7 +2737,29 @@ class InteractiveCanvasView(QGraphicsView):
         return puntos_suaves
 
     def wheelEvent(self, event):
-        """Controla el Zoom y el Desplazamiento usando el estándar de diseño"""
+        
+        # ========================================================
+        # 🚀 1. ACTIVAR MODO TURBO (Baja Resolución / Alto FPS)
+        # ========================================================
+        if getattr(self, 'zoom_timer', None): # Verificamos que el timer exista
+            if not getattr(self, 'is_zooming', False):
+                self.is_zooming = True
+                
+                # Apagamos el suavizado de bordes (El asesino de CPUs)
+                self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                
+                # Congelamos los vectores pesados
+                for item in self.scene().items():
+                    if type(item).__name__ == 'PremiumCompositeSvgItem':
+                        item.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
+
+            # Reiniciamos el reloj para saber cuándo dejó de girar la rueda
+            self.zoom_timer.start(150) # 150 milisegundos de espera
+
+        # ========================================================
+        # 👇 2. TU CÓDIGO ORIGINAL DE ZOOM Y DESPLAZAMIENTO 👇
+        # ========================================================
         mods = event.modifiers()
         delta = event.angleDelta().y()
         
@@ -2748,7 +2775,9 @@ class InteractiveCanvasView(QGraphicsView):
 
             factor = 1.15 if delta > 0 else 1.0 / 1.15
             self.scale(factor, factor)
-            self.zoom *= factor
+            
+            if hasattr(self, 'zoom'):
+                self.zoom *= factor
             
             pos_scene_despues = self.mapToScene(pos_view)
             
@@ -2762,6 +2791,25 @@ class InteractiveCanvasView(QGraphicsView):
 
             if getattr(self, 'uid_activo', None):
                 self.dibujar_controles_seleccion()
+
+    def _terminar_zoom(self):
+        """
+        🚀 RESTAURACIÓN ULTRA-HD:
+        El usuario soltó la rueda. Devolvemos el motor a su máxima calidad visual.
+        """
+        self.is_zooming = False
+        from PyQt6.QtGui import QPainter
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        
+        from PyQt6.QtWidgets import QGraphicsItem
+        for item in self.scene().items():
+            if type(item).__name__ == 'PremiumCompositeSvgItem':
+                # Volvemos a encender las matemáticas precisas para que el vector se vea nítido
+                item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                
+        # Forzamos un repintado final perfecto
+        self.viewport().update()
 
     # ==========================================
     # SISTEMA DE EDICIÓN DE TEXTO (DOBLE CLIC)
