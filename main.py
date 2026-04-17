@@ -30,6 +30,7 @@ from dialogs import NewDocumentDialog
 from properties_panel import PropertiesPanel
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtGui import QSurfaceFormat
+import hardware
 
 # --- COLORES EXACTOS DEL DISEÑO PREMIUM ---
 BG_NAV = "#1A1B1E"          # Fondo de la barra de navegación (Columna 1)
@@ -1647,7 +1648,7 @@ class InteractiveCanvasView(QGraphicsView):
         # =======================================================
         # 🚀 SELECTOR DE MOTOR DE RENDERIZADO (CPU vs GPU)
         # =======================================================
-        self.motor_render = "GPU" # Cambia a "CPU" para PC de bajos recursos
+        self.motor_render = hardware.detectar_motor_optimo() # Cambia a "CPU" para PC de bajos recursos
 
         if self.motor_render == "GPU":
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -2755,53 +2756,48 @@ class InteractiveCanvasView(QGraphicsView):
         return puntos_suaves
 
     def wheelEvent(self, event):
-        """Controla el Zoom y el Desplazamiento (Con Proxy Auto-Híbrido CPU/GPU)"""
-        from PyQt6.QtWidgets import QGraphicsView
-        from PyQt6.QtGui import QPixmap
-        from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+        """Controla el Zoom y el Desplazamiento (Modo LOD Cajas Fantasma estilo AutoCAD)"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QGraphicsView, QGraphicsRectItem
+        from PyQt6.QtGui import QColor, QPen, QBrush
         
         # ========================================================
-        # 🚀 1. ACTIVAR CÁMARA PROXY (Captura Ultra-Rápida)
+        # 🚀 1. ACTIVAR MODO CAJAS FANTASMA (Cero Matemáticas)
         # ========================================================
         if getattr(self, 'zoom_timer', None):
             if not getattr(self, 'is_zooming', False):
                 self.is_zooming = True
+                self.setInteractive(False) # Apagamos colisiones
                 
-                # A. 🚀 TOMA DE PANTALLAZO INTELIGENTE (El secreto de la velocidad)
-                viewport_widget = self.viewport()
-                vp_rect = viewport_widget.rect()
-                
-                if isinstance(viewport_widget, QOpenGLWidget):
-                    # ESTAMOS EN GPU: Tomamos la foto directo de la VRAM (Toma 0.0001 ms)
-                    pantallazo_img = viewport_widget.grabFramebuffer()
-                    pantallazo = QPixmap.fromImage(pantallazo_img)
-                else:
-                    # ESTAMOS EN CPU: Pantallazo tradicional
-                    pantallazo = viewport_widget.grab(vp_rect)
-                
-                # B. Creamos un objeto de imagen con esa foto
-                from PyQt6.QtWidgets import QGraphicsPixmapItem
-                self.zoom_proxy = QGraphicsPixmapItem(pantallazo)
-                
-                # C. La alineamos milimétricamente con el mundo 2D
-                escena_rect = self.mapToScene(vp_rect).boundingRect()
-                self.zoom_proxy.setPos(escena_rect.topLeft())
-                
-                escala_x = escena_rect.width() / pantallazo.width()
-                self.zoom_proxy.setScale(escala_x)
-                self.zoom_proxy.setZValue(999999) # Arriba de todo
-                
-                self.scene().addItem(self.zoom_proxy)
-                
-                # D. APAGAMOS LA MATEMÁTICA PESADA
                 self.vectores_ocultos = []
-                if hasattr(self, 'items_ui'):
-                    for item in self.items_ui.values():
+                self.cajas_fantasma = []
+                main_window = self.window()
+                
+                if hasattr(main_window, 'items_ui'):
+                    for item in main_window.items_ui.values():
+                        # Solo afectamos a los SVGs pesados. (Las fotos PNG/JPG ya son rápidas en GPU)
                         if type(item).__name__ == 'PremiumCompositeSvgItem' and item.isVisible():
-                            item.hide() 
-                            self.vectores_ocultos.append(item)
                             
-                self.setInteractive(False)
+                            # A. Clonamos matemáticamente la caja del objeto
+                            proxy = QGraphicsRectItem(item.boundingRect())
+                            proxy.setPos(item.pos())
+                            proxy.setRotation(item.rotation())
+                            proxy.setScale(item.scale())
+                            proxy.setTransform(item.transform())
+                            proxy.setTransformOriginPoint(item.transformOriginPoint())
+                            proxy.setZValue(item.zValue())
+                            
+                            # B. Estilo "Plano Arquitectónico" (Gris Semi-transparente)
+                            proxy.setBrush(QBrush(QColor(150, 150, 150, 80)))
+                            grosor_borde = 2.0 / self.transform().m11() if self.transform().m11() > 0 else 2.0
+                            proxy.setPen(QPen(QColor(100, 100, 100, 200), grosor_borde))
+                            
+                            self.scene().addItem(proxy)
+                            self.cajas_fantasma.append(proxy)
+                            
+                            # C. Ocultamos el SVG original (¡Adiós lag!)
+                            item.hide()
+                            self.vectores_ocultos.append(item)
 
             self.zoom_timer.start(150)
 
@@ -2842,32 +2838,28 @@ class InteractiveCanvasView(QGraphicsView):
 
     def _terminar_zoom(self):
         """
-        🚀 RESTAURACIÓN MATEMÁTICA:
-        El usuario soltó la rueda. Devolvemos las texturas a vectores matemáticos UHD.
+        🚀 RESTAURACIÓN ULTRA-HD
+        El usuario soltó la rueda. Destruimos los bloques y revivimos las curvas.
         """
         self.is_zooming = False
+        self.setInteractive(True)
         
-        from PyQt6.QtGui import QPainter
-        from PyQt6.QtWidgets import QGraphicsItem
-        
-        # 1. Encendemos el mundo real
-        self.setInteractive(True) 
-        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        
-        # 2. Devolvemos el caché matemático a los SVGs
-        if hasattr(self, 'items_ui'):
-            for item in self.items_ui.values():
-                if type(item).__name__ == 'PremiumCompositeSvgItem':
-                    # DeviceCoordinateCache recalcula los vectores perfectos para esta nueva escala
-                    item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
-                    item.update()
-
+        # 1. Destruimos las Cajas Fantasma
+        if hasattr(self, 'cajas_fantasma'):
+            for proxy in self.cajas_fantasma:
+                self.scene().removeItem(proxy)
+            self.cajas_fantasma.clear()
+            
+        # 2. Despertamos a los SVGs Pesados
+        if hasattr(self, 'vectores_ocultos'):
+            for item in self.vectores_ocultos:
+                item.show()
+            self.vectores_ocultos.clear()
+            
         if getattr(self, 'uid_activo', None):
             self.dibujar_controles_seleccion()
             
         self.viewport().update()
-
     # ==========================================
     # SISTEMA DE EDICIÓN DE TEXTO (DOBLE CLIC)
     # ==========================================
@@ -3397,8 +3389,6 @@ class InteractiveCanvasView(QGraphicsView):
                             # 1. Recuperamos la geometría exacta
                             from PyQt6.QtCore import QRectF, QSize
                             import tempfile
-                            import os
-                            import time
                             
                             caja_local = QRectF(datos_pieza['x_local'], datos_pieza['y_local'], datos_pieza['w'], datos_pieza['h'])
                             caja_scene = item_visual.mapToScene(caja_local).boundingRect()
