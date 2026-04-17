@@ -877,10 +877,10 @@ class RectorOP:
 
             if bw <= 0.01 or bh <= 0.01: continue
 
-            v_bx = bx - (bw * 0.005)
-            v_by = by - (bh * 0.005)
-            v_bw = bw + (bw * 0.01)
-            v_bh = bh + (bh * 0.01)
+            v_bx = bx
+            v_by = by
+            v_bw = bw
+            v_bh = bh
 
             final_w = v_bw * escala_global_x
             final_h = v_bh * escala_global_y
