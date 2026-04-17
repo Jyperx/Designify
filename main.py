@@ -1464,6 +1464,7 @@ class PremiumCompositeSvgItem(QGraphicsPathItem):
             painter.drawPath(self.hovered_path)
 
     def extraer_sub_forma(self, pos_scene):
+        from PyQt6.QtCore import Qt
         click_pos = self.mapFromScene(pos_scene)
         for i in reversed(range(len(self.datos_maestros))):
             if i in self.deleted_indices: continue
@@ -1482,10 +1483,16 @@ class PremiumCompositeSvgItem(QGraphicsPathItem):
                 
                 caja = data['path'].boundingRect()
                 brush = data['brush']
+                pen = data.get('pen') # 🚀 EXTRAEMOS LA INFORMACIÓN DEL BORDE
+                
                 color_hex = brush.color().name() if brush.style() == Qt.BrushStyle.SolidPattern else None
+                borde_hex = pen.color().name() if pen and pen.style() != Qt.PenStyle.NoPen else None
+                borde_grosor = pen.widthF() if pen else 0.0
+                
                 return {
                     'x_local': caja.x(), 'y_local': caja.y(), 'w': caja.width(), 'h': caja.height(), 
                     'color': color_hex, 'brush': brush, 'path': data['path'],
+                    'borde_color': borde_hex, 'borde_grosor': borde_grosor, 'pen': pen, # 🚀 ENVIAMOS EL BORDE
                     'tag': data.get('tag', 'path'), 'forma': data.get('forma', 'Rectángulo')
                 }
         return None
@@ -3293,9 +3300,16 @@ class InteractiveCanvasView(QGraphicsView):
                             forma_final = datos_pieza.get('forma', 'Rectángulo')
                             contenido_final = ''
                             color_pieza = datos_pieza['color']
-                            brush_pieza = datos_pieza['brush'] # 🚀 Extraemos el pincel mágico
+                            brush_pieza = datos_pieza['brush'] 
                             
-                            # 🚀 Si es un Path complejo O TIENE DEGRADADO, lo forzamos a ser un Mini-SVG
+                            # 🚀 RECUPERAMOS LOS DATOS DEL BORDE
+                            borde_color = datos_pieza.get('borde_color')
+                            borde_grosor = datos_pieza.get('borde_grosor', 0)
+                            pen_pieza = datos_pieza.get('pen')
+                            
+                            from PyQt6.QtGui import QPen
+                            if not pen_pieza: pen_pieza = QPen(Qt.PenStyle.NoPen)
+                            
                             es_degradado = brush_pieza.style() not in [Qt.BrushStyle.SolidPattern, Qt.BrushStyle.NoBrush]
 
                             if datos_pieza.get('tag') == 'path' or es_degradado:
@@ -3320,9 +3334,8 @@ class InteractiveCanvasView(QGraphicsView):
                                 painter = QPainter(generator)
                                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                                 
-                                # 🚀 INYECCIÓN DEL DEGRADADO: Usamos el pincel original de Illustrator
                                 painter.setBrush(brush_pieza)
-                                painter.setPen(Qt.PenStyle.NoPen)
+                                painter.setPen(pen_pieza) # 🚀 LA CURA: Aplicamos el borde real en vez de forzar "NoPen"
                                 painter.drawPath(path_normalizado)
                                 painter.end()
                                 
@@ -3336,8 +3349,9 @@ class InteractiveCanvasView(QGraphicsView):
                                 contenido=contenido_final,
                                 x=pdf_cx - (w_real / 2.0), y=pdf_cy - (h_real / 2.0), 
                                 w=w_real, h=h_real,
-                                color_tx=color_pieza, # Si era degradado esto es None, y usa el SVG generado
-                                borde_grosor=0,
+                                color_tx=color_pieza, 
+                                borde_color=borde_color,   # 🚀 AHORA SÍ GUARDAMOS EL COLOR DEL BORDE
+                                borde_grosor=borde_grosor, # 🚀 Y SU GROSOR
                                 z_index=elem.get('z_index', 0) + 1,
                                 parent_marco=elem.get('parent_marco')
                             )
@@ -3594,11 +3608,6 @@ class InteractiveCanvasView(QGraphicsView):
         
         accion_copiar = menu.addAction(qta.icon('fa5s.copy', color=icon_color), "Copiar")
         accion_copiar.setShortcut("Ctrl+C")
-        
-        accion_descomponer = None
-        if es_svg:
-            accion_descomponer = menu.addAction(qta.icon('fa5s.object-ungroup', color=icon_color), "Descomponer SVG")
-            accion_descomponer.setShortcut("Ctrl+Shift+G")
             
         menu.addSeparator()
         
@@ -3629,10 +3638,6 @@ class InteractiveCanvasView(QGraphicsView):
             if accion == accion_copiar:
                 self._ejecutar_copiar()
                 return 
-                
-            if accion_descomponer and accion == accion_descomponer:
-                self.descomponer_svg_en_capas(self.uid_activo)
-                return
 
             self.motor.registrar_punto_historial()
             
