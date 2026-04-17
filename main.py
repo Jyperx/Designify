@@ -1918,13 +1918,14 @@ class InteractiveCanvasView(QGraphicsView):
             def get_hierarchical_hash(nodo_uid):
                 h_data = []
                 curr = nodo_uid
-                # Leemos los datos del objeto y de todos sus abuelos hacia arriba
                 while curr and curr in self.motor.elementos:
                     e_curr = self.motor.elementos[curr]
                     persp = e_curr.get('perspectiva', [[0,0],[0,0],[0,0],[0,0]])
                     p_hash = tuple(tuple(round(v, 2) for v in pt) for pt in persp)
                     
-                    # Usamos float() por seguridad contra variables vacías o strings
+                    # 🚀 LA CURA: Incluir los recortes en la huella digital
+                    del_idx = tuple(e_curr.get('deleted_indices', []))
+                    
                     h_data.append((
                         round(float(e_curr.get('x', 0.0)), 2), round(float(e_curr.get('y', 0.0)), 2), 
                         round(float(e_curr.get('w', 0.0)), 2), round(float(e_curr.get('h', 0.0)), 2), 
@@ -1932,7 +1933,8 @@ class InteractiveCanvasView(QGraphicsView):
                         e_curr.get('z_index', 0), e_curr.get('fuente', ''),
                         round(float(e_curr.get('stretch_x', 1.0)), 4), round(float(e_curr.get('stretch_y', 1.0)), 4),
                         round(float(e_curr.get('rot_3d_x', 0.0)), 2), round(float(e_curr.get('rot_3d_y', 0.0)), 2),
-                        p_hash
+                        p_hash,
+                        del_idx # <--- ¡AÑADIDO AQUÍ!
                     ))
                     curr = e_curr.get('parent_marco')
                 return tuple(h_data)
@@ -3661,14 +3663,15 @@ class InteractiveCanvasView(QGraphicsView):
             elif accion == accion_ocultar:
                 self.motor.modificar_elemento(self.uid_activo, oculto=not esta_oculto)
             elif accion == accion_eliminar:
-                # 🚀 DESTRUCCIÓN OPTIMIZADA INSTANTÁNEA (Soporta múltiples objetos)
                 for uid_sel in self.uids_seleccionados:
                     if uid_sel in self.items_ui:
                         item_ui = self.items_ui.pop(uid_sel)
                         self.scene().removeItem(item_ui)
                     self.motor.eliminar_elemento(uid_sel, limpiar_cache=False)
                     
-                self.motor.limpiar_cache_imagenes()
+                # 🚀 LLAMAMOS AL NUEVO RECOLECTOR DE BASURA
+                self.limpiar_memoria_grafica()
+                    
                 self.uids_seleccionados = []
                 self.uid_activo = None
                 
@@ -4731,7 +4734,7 @@ class InteractiveCanvasView(QGraphicsView):
                     # 4. Le decimos al motor matemático que destruya los datos y limpie la RAM
                     for uid_sel in self.uids_seleccionados:
                         self.motor.eliminar_elemento(uid_sel, limpiar_cache=False)
-                    self.motor.limpiar_cache_imagenes()
+                    self.limpiar_memoria_grafica()
                     
                     self.uids_seleccionados = []
                     self.uid_activo = None
@@ -4972,6 +4975,38 @@ class InteractiveCanvasView(QGraphicsView):
         path_final.addPolygon(QPolygonF(poly_maestro))
         
         return path_final
+
+    def limpiar_memoria_grafica(self):
+        """
+        El Recolector de Basura Universal: 
+        Revisa qué fotos y SVGs están vivos en el lienzo o en la máquina del tiempo.
+        Si algo ya no se usa, lo aniquila de la memoria RAM y de la VRAM.
+        """
+        recursos_activos = set()
+        
+        # 1. Escanear el presente
+        for elem in self.motor.elementos.values():
+            if elem.get('tipo') == 'Foto':
+                recursos_activos.add(str(elem.get('contenido', '')))
+                
+        # 2. Escanear el pasado y el futuro (Historial)
+        for estado in self.motor.pila_deshacer + self.motor.pila_rehacer:
+            for elem in estado['elementos'].values():
+                if elem and elem.get('tipo') == 'Foto':
+                    recursos_activos.add(str(elem.get('contenido', '')))
+                    
+        # 3. Limpiar Imágenes Normales (PNG/JPG)
+        rutas_pixmaps = list(self.cache_pixmaps.keys())
+        for ruta in rutas_pixmaps:
+            if ruta not in recursos_activos:
+                del self.cache_pixmaps[ruta]
+                
+        # 4. Limpiar SVGs Pesados (Chunks en C++)
+        if hasattr(self.window(), '_flyweight_cache'):
+            rutas_svg = list(self.window()._flyweight_cache.keys())
+            for ruta in rutas_svg:
+                if ruta not in recursos_activos:
+                    del self.window()._flyweight_cache[ruta]
 
 class DocumentTab(QWidget):
     """Una pestaña independiente que contiene su propio Motor y su propio Lienzo"""
