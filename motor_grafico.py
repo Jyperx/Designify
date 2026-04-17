@@ -1267,33 +1267,32 @@ class RectorOP:
                 
                 if contenido.lower().endswith('.svg'):
                     # =======================================================
-                    # 🚀 EL PUENTE SUPREMO: QT -> REPORTLAB (Vector Puro)
+                    # 🚀 EL PUENTE SUPREMO CORREGIDO: SIN GIROS NI ERRORES
                     # =======================================================
                     try:
-                        # 1. Usamos el parser infalible que creamos para UI
                         geometrias = self.extraer_geometria_cruda(contenido)
-                        if not geometrias: raise ValueError("SVG vacío o corrupto")
+                        if not geometrias: raise ValueError("SVG vacío")
 
                         from PyQt6.QtGui import QPainterPath
                         from PyQt6.QtCore import Qt
                         
-                        # 2. Calculamos la caja original del SVG para saber la escala
                         bbox_global = QPainterPath()
                         for geo in geometrias: bbox_global.addPath(geo['path'])
                         caja_svg = bbox_global.boundingRect()
                         
-                        if caja_svg.width() <= 0 or caja_svg.height() <= 0: raise ValueError("Caja matemática inválida")
+                        if caja_svg.width() <= 0 or caja_svg.height() <= 0: raise ValueError("Caja inválida")
 
                         escala_x = w / caja_svg.width()
                         escala_y = h / caja_svg.height()
 
                         c.saveState()
-                        if opacidad < 1.0:
-                            c.setFillAlpha(opacidad)
-                            c.setStrokeAlpha(opacidad)
-                            
-                        # 3. Alineamos el origen del PDF con el origen del SVG
-                        c.translate(x, y)
+                        
+                        # --- 🚀 PASO 1: CORRECCIÓN DE VOLTEO VERTICAL ---
+                        # Movemos el origen a la parte superior del objeto y volteamos el eje Y
+                        c.translate(x, y + h) 
+                        c.scale(1, -1)
+                        
+                        # Aplicamos la escala del SVG y alineamos con su caja interna
                         c.scale(escala_x, escala_y)
                         c.translate(-caja_svg.x(), -caja_svg.y())
 
@@ -1303,35 +1302,11 @@ class RectorOP:
                             brush = geo['brush']
                             pen = geo['pen']
 
-                            fill_flag = 0
-                            stroke_flag = 0
-
-                            # --- A. Aplicar Relleno ---
-                            if brush.style() != Qt.BrushStyle.NoBrush:
-                                if color_tx: # Si el usuario inyectó un color desde tu panel
-                                    try: c.setFillColor(HexColor(color_tx))
-                                    except: pass
-                                else:
-                                    qc = brush.color()
-                                    c.setFillColorRGB(qc.redF(), qc.greenF(), qc.blueF(), qc.alphaF())
-                                fill_flag = 1
-
-                            # --- B. Aplicar Borde (Vital para el Láser) ---
-                            if pen.style() != Qt.PenStyle.NoPen:
-                                qc = pen.color()
-                                c.setStrokeColorRGB(qc.redF(), qc.greenF(), qc.blueF(), qc.alphaF())
-                                grosor_pen = pen.widthF()
-                                # Aseguramos que la línea súper fina de 0.05 se exporte tal cual
-                                c.setLineWidth(grosor_pen if grosor_pen > 0 else 0.1)
-                                stroke_flag = 1
-
-                            # --- C. Traducción de Curvas Matemáticas ---
+                            # --- 📐 PASO A: CONSTRUIR EL TRAZO MATEMÁTICO ---
                             p = c.beginPath()
                             i = 0
                             while i < qpath.elementCount():
                                 el = qpath.elementAt(i)
-                                
-                                # 🚀 LA CURA PyQt6: Comparamos con las constantes de Enum directamente
                                 if el.type == QPainterPath.ElementType.MoveToElement:
                                     p.moveTo(el.x, el.y)
                                     i += 1
@@ -1339,23 +1314,86 @@ class RectorOP:
                                     p.lineTo(el.x, el.y)
                                     i += 1
                                 elif el.type == QPainterPath.ElementType.CurveToElement:
-                                    # Requiere 3 puntos en total (El actual + 2 anclajes)
                                     if i + 2 < qpath.elementCount():
                                         el2 = qpath.elementAt(i+1)
                                         el3 = qpath.elementAt(i+2)
                                         p.curveTo(el.x, el.y, el2.x, el2.y, el3.x, el3.y)
                                     i += 3
                                 else:
-                                    # Ignoramos puntos de control sueltos (CurveToDataElement)
                                     i += 1
 
-                            if fill_flag or stroke_flag:
-                                c.drawPath(p, fill=fill_flag, stroke=stroke_flag)
-
-                        c.restoreState()
+                            # --- 🎨 PASO B: APLICAR COLOR, BORDES Y DEGRADADOS NATIVOS ---
+                            fill_flag, stroke_flag = 0, 0
+                            
+                            # Preparar el borde (si existe)
+                            if pen.style() != Qt.PenStyle.NoPen:
+                                qc = pen.color()
+                                c.setStrokeColorRGB(qc.redF(), qc.greenF(), qc.blueF())
+                                c.setStrokeAlpha(qc.alphaF() * opacidad)
+                                c.setLineWidth(pen.widthF())
+                                stroke_flag = 1
+                            
+                            # Evaluar el tipo de relleno
+                            if brush.style() == Qt.BrushStyle.SolidPattern:
+                                # Relleno Sólido Normal
+                                qc = brush.color()
+                                c.setFillColorRGB(qc.redF(), qc.greenF(), qc.blueF())
+                                c.setFillAlpha(qc.alphaF() * opacidad)
+                                c.drawPath(p, fill=1, stroke=stroke_flag)
+                                
+                            elif brush.style() in [Qt.BrushStyle.LinearGradientPattern, Qt.BrushStyle.RadialGradientPattern]:
+                                # 🚀 LA CURA DE LOS DEGRADADOS: Dibujo Dinámico
+                                grad = brush.gradient()
+                                try:
+                                    # Extraer los colores y opacidades exactas del degradado
+                                    paradas = grad.stops()
+                                    colores_grad = []
+                                    from reportlab.lib.colors import Color
+                                    from PyQt6.QtGui import QGradient
+                                    for pos, qc in paradas:
+                                        # Mapeamos los colores de Qt a ReportLab (incluyendo el Alpha)
+                                        colores_grad.append(Color(qc.redF(), qc.greenF(), qc.blueF(), alpha=qc.alphaF() * opacidad))
+                                    
+                                    # Magia de ReportLab: Usar el trazo como "Máscara de Recorte"
+                                    c.saveState()
+                                    c.clipPath(p, stroke=0, fill=0)
+                                    
+                                    caja_path = qpath.boundingRect()
+                                    px, py = caja_path.x(), caja_path.y()
+                                    pw, ph = caja_path.width(), caja_path.height()
+                                    
+                                    if grad.type() == QGradient.Type.LinearGradient:
+                                        # Si el parser usó ObjectBoundingMode (0.0 a 1.0), los escalamos al tamaño real
+                                        es_relativo = grad.coordinateMode() == QGradient.CoordinateMode.ObjectBoundingMode
+                                        x0_abs = px + (grad.start().x() * pw) if es_relativo else grad.start().x()
+                                        y0_abs = py + (grad.start().y() * ph) if es_relativo else grad.start().y()
+                                        x1_abs = px + (grad.finalStop().x() * pw) if es_relativo else grad.finalStop().x()
+                                        y1_abs = py + (grad.finalStop().y() * ph) if es_relativo else grad.finalStop().y()
+                                        
+                                        c.linearGradient(x0_abs, y0_abs, x1_abs, y1_abs, colores_grad)
+                                    else:
+                                        # Si es Radial u otro tipo complejo, trazamos un lineal en diagonal como respaldo seguro
+                                        c.linearGradient(px, py, px + pw, py + ph, colores_grad)
+                                        
+                                    c.restoreState()
+                                    
+                                    # Finalmente, si la pieza tenía borde, lo pintamos por encima de la máscara
+                                    if stroke_flag:
+                                        c.drawPath(p, fill=0, stroke=1)
+                                        
+                                except Exception as e:
+                                    print(f"Error procesando degradado nativo: {e}")
+                                    # Si el degradado falla matemáticamente, rellenamos con color plano para no dejar huecos
+                                    c.setFillColorRGB(0.8, 0.8, 0.8)
+                                    c.drawPath(p, fill=1, stroke=stroke_flag)
+                            else:
+                                # Figura hueca (Solo borde)
+                                if stroke_flag:
+                                    c.drawPath(p, fill=0, stroke=1)
                         
                     except Exception as e:
-                        print(f"⚠️ Motor nativo SVG falló, activando Fallback Ultra-HD: {e}")
+                        print(f"⚠️ Fallback activado por: {e}")
+                        # Mantener el código de fallback de imagen 600dpi por seguridad...
                         # 🛡️ FALLBACK AUTOMÁTICO: Si algo se rompe, rasteriza el SVG a calidad imprenta (600 DPI)
                         try:
                             doc = fitz.open(contenido)
