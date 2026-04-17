@@ -1640,30 +1640,40 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 1. LÍMITES MATEMÁTICOS DE ESCENA
         self.scene().setSceneRect(-2000, -2000, self.motor.w_pdf + 4000, self.motor.h_pdf + 4000)
 
-        # 🚀 2. BANDERAS RASTER (Ahora apoyadas por GPU)
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        self.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-
         # =======================================================
         # 🚀 SELECTOR DE MOTOR DE RENDERIZADO (CPU vs GPU)
         # =======================================================
-        self.motor_render = hardware.detectar_motor_optimo() # Cambia a "CPU" para PC de bajos recursos
+        self.motor_render = hardware.detectar_motor_optimo()
 
         if self.motor_render == "GPU":
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
             from PyQt6.QtGui import QSurfaceFormat
+            
             gl_format = QSurfaceFormat()
-            gl_format.setSamples(4) # Suavizado x4 por hardware
+            # 🚀 CURA 1: Subimos las muestras a 8 para un borde de navaja en textos y pluma
+            gl_format.setSamples(8) 
+            
+            # 🚀 CURA 2: Forzamos a Qt a que el contexto OpenGL asimile el MSAA
+            QSurfaceFormat.setDefaultFormat(gl_format)
+            
             gl_widget = QOpenGLWidget()
             gl_widget.setFormat(gl_format)
+            
+            # Inyectamos el motor gráfico
             self.setViewport(gl_widget)
             self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         else:
             # Configuración Clásica CPU
             self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
-            self.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # =======================================================
+        # 🚀 2. BANDERAS RASTER (Deber ir SIEMPRE DESPUÉS de setViewport)
+        # =======================================================
+        # Al declararlas después, nos aseguramos de que el motor de GPU 
+        # (o el de CPU) las reciba y no se reinicien al inyectar el widget.
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ⚡ MEMORIA Y CACHÉ
         self.setCacheMode(QGraphicsView.CacheModeFlag.CacheBackground)
@@ -2323,12 +2333,18 @@ class InteractiveCanvasView(QGraphicsView):
         es_trazo = tipo == 'Trazo'
         es_forma = tipo in ['Forma', 'Marco'] 
         
-        if es_svg or es_texto or es_trazo or es_forma:
-            # 🚀 DeviceCoordinateCache: Obliga a Qt a recalcular las matemáticas en vivo 
-            # cuando haces zoom. ¡Tus SVGs serán filos de navaja infinitos!
-            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
-        else:
+        # 👇 --- LA CURA DEL TEXTO DENTADO EN OPENGL --- 👇
+        if getattr(self, 'motor_render', 'CPU') == "GPU":
+            # La GPU dibuja vectores a la velocidad de la luz. 
+            # El caché en OpenGL usa FBOs sin MSAA, lo que rompe el Antialiasing.
             item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+        else:
+            # Comportamiento original para PC's de bajos recursos (Modo CPU)
+            if es_svg or es_texto or es_trazo or es_forma:
+                item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            else:
+                item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+        # 👆 -------------------------------------------- 👆
 
         self.scene().addItem(item)
         self.items_ui[uid] = item
