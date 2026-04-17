@@ -2756,53 +2756,35 @@ class InteractiveCanvasView(QGraphicsView):
         return puntos_suaves
 
     def wheelEvent(self, event):
-        """Controla el Zoom y el Desplazamiento (Modo LOD Cajas Fantasma estilo AutoCAD)"""
+        """Controla el Zoom y el Desplazamiento (Modo LOD Pixelado Ultra-Rápido)"""
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QGraphicsView, QGraphicsRectItem
-        from PyQt6.QtGui import QColor, QPen, QBrush
+        from PyQt6.QtWidgets import QGraphicsView, QGraphicsItem
+        from PyQt6.QtGui import QPainter
         
         # ========================================================
-        # 🚀 1. ACTIVAR MODO CAJAS FANTASMA (Cero Matemáticas)
+        # 🚀 1. ACTIVAR MODO PIXELADO (Cero Matemáticas Vectoriales)
         # ========================================================
         if getattr(self, 'zoom_timer', None):
             if not getattr(self, 'is_zooming', False):
                 self.is_zooming = True
-                self.setInteractive(False) # Apagamos colisiones
                 
-                self.vectores_ocultos = []
-                self.cajas_fantasma = []
-                main_window = self.window()
+                # 1. Apagamos interactividad y suavizado
+                self.setInteractive(False)
+                self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
                 
-                if hasattr(main_window, 'items_ui'):
-                    for item in main_window.items_ui.values():
-                        # Solo afectamos a los SVGs pesados. (Las fotos PNG/JPG ya son rápidas en GPU)
-                        if type(item).__name__ == 'PremiumCompositeSvgItem' and item.isVisible():
-                            
-                            # A. Clonamos matemáticamente la caja del objeto
-                            proxy = QGraphicsRectItem(item.boundingRect())
-                            proxy.setPos(item.pos())
-                            proxy.setRotation(item.rotation())
-                            proxy.setScale(item.scale())
-                            proxy.setTransform(item.transform())
-                            proxy.setTransformOriginPoint(item.transformOriginPoint())
-                            proxy.setZValue(item.zValue())
-                            
-                            # B. Estilo "Plano Arquitectónico" (Gris Semi-transparente)
-                            proxy.setBrush(QBrush(QColor(150, 150, 150, 80)))
-                            grosor_borde = 2.0 / self.transform().m11() if self.transform().m11() > 0 else 2.0
-                            proxy.setPen(QPen(QColor(100, 100, 100, 200), grosor_borde))
-                            
-                            self.scene().addItem(proxy)
-                            self.cajas_fantasma.append(proxy)
-                            
-                            # C. Ocultamos el SVG original (¡Adiós lag!)
-                            item.hide()
-                            self.vectores_ocultos.append(item)
+                # 2. 🚀 CORRECCIÓN: ¡El diccionario vive en 'self'!
+                if hasattr(self, 'items_ui'):
+                    for item in self.items_ui.values():
+                        # Afectamos solo a los vectores pesados
+                        if type(item).__name__ == 'PremiumCompositeSvgItem':
+                            # ItemCoordinateCache obliga a Qt a tomar una "foto" pixelada en VRAM
+                            item.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
 
             self.zoom_timer.start(150)
 
         # ========================================================
-        # 👇 2. CÓDIGO DE ZOOM Y DESPLAZAMIENTO ORIGINAL 👇
+        # 👇 2. BLOQUEO DE FRAMES Y MATEMÁTICA DE ZOOM 👇
         # ========================================================
         mods = event.modifiers()
         delta = event.angleDelta().y()
@@ -2812,6 +2794,11 @@ class InteractiveCanvasView(QGraphicsView):
         elif mods & Qt.KeyboardModifier.AltModifier:
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta)
         else:
+            # 🚀 EVITAMOS EL LAG: Le prohibimos a Qt repintar la pantalla 3 veces
+            modo_actual = self.viewportUpdateMode()
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.NoViewportUpdate)
+            
+            # --- Tu Matemática Original ---
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
             
             pos_view = event.position().toPoint() if hasattr(event, 'position') else event.pos()
@@ -2832,30 +2819,33 @@ class InteractiveCanvasView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() + int(delta_y))
             
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+            # -------------------------------
 
-            if getattr(self, 'uid_activo', None) and not self.is_zooming:
-                self.dibujar_controles_seleccion()
+            # 🚀 DESBLOQUEO: Repintamos UNA SOLA VEZ
+            self.setViewportUpdateMode(modo_actual)
+            self.viewport().update()
 
     def _terminar_zoom(self):
         """
         🚀 RESTAURACIÓN ULTRA-HD
-        El usuario soltó la rueda. Destruimos los bloques y revivimos las curvas.
+        El usuario soltó la rueda. Devolvemos el cálculo vectorial perfecto a los SVGs.
         """
         self.is_zooming = False
-        self.setInteractive(True)
+        from PyQt6.QtGui import QPainter
+        from PyQt6.QtWidgets import QGraphicsItem
         
-        # 1. Destruimos las Cajas Fantasma
-        if hasattr(self, 'cajas_fantasma'):
-            for proxy in self.cajas_fantasma:
-                self.scene().removeItem(proxy)
-            self.cajas_fantasma.clear()
-            
-        # 2. Despertamos a los SVGs Pesados
-        if hasattr(self, 'vectores_ocultos'):
-            for item in self.vectores_ocultos:
-                item.show()
-            self.vectores_ocultos.clear()
-            
+        self.setInteractive(True)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        
+        # 🚀 CORRECCIÓN: Apuntamos a 'self' para despertar los vectores
+        if hasattr(self, 'items_ui'):
+            for item in self.items_ui.values():
+                if type(item).__name__ == 'PremiumCompositeSvgItem':
+                    # DeviceCoordinateCache es la calidad máxima de Qt para SVGs
+                    item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                    item.update() # Forzamos a que limpie la textura pixelada
+        
         if getattr(self, 'uid_activo', None):
             self.dibujar_controles_seleccion()
             
