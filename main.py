@@ -6713,8 +6713,19 @@ def boot_motor_aceleracion():
 
 
 if __name__ == "__main__":
+    import sys
+    from PyQt6.QtGui import QSurfaceFormat
+    from PyQt6.QtWidgets import QApplication
+
+    # 👇 1. ESTO ES LO QUE SALVARÁ TUS VECTORES (ANTES de QApplication) 👇
+    gl_format = QSurfaceFormat()
+    gl_format.setSamples(8)  # 🚀 Fuerza 8 muestras de Antialiasing en la GPU
+    gl_format.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+    QSurfaceFormat.setDefaultFormat(gl_format)
+    # 👆 --------------------------------------------------------------- 👆
     # Arrancamos la detección ANTES de que nazca la aplicación
     boot_motor_aceleracion()
+    
     
     app = QApplication(sys.argv)
     window = MainDesignStudio()
