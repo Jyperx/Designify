@@ -1266,47 +1266,105 @@ class RectorOP:
                 forma = elem.get('forma', 'Normal')
                 
                 if contenido.lower().endswith('.svg'):
+                    # =======================================================
+                    # 🚀 EL PUENTE SUPREMO: QT -> REPORTLAB (Vector Puro)
+                    # =======================================================
                     try:
-                        # 🚀 ESCUDO ANTI-CRASH: Sistema Híbrido Vector/Raster
-                        if contenido not in self.cache_imagenes:
-                            import xml.etree.ElementTree as ET
-                            try:
-                                tree = ET.parse(contenido)
-                                # Si tiene más de 600 nodos (Ej. hecho por IA), lo rasterizamos a 300dpi
-                                if len(list(tree.iter())) > 600:
-                                    doc = fitz.open(contenido)
-                                    pix = doc[0].get_pixmap(dpi=300, alpha=True) 
-                                    img_b = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
-                                    self.cache_imagenes[contenido] = ImageReader(img_b)
-                                else:
-                                    self.cache_imagenes[contenido] = svg2rlg(contenido)
-                            except:
-                                self.cache_imagenes[contenido] = svg2rlg(contenido)
-                                
-                        dibujo_base = self.cache_imagenes[contenido]
-                        
-                        # Si se rasterizó por ser muy pesado
-                        if isinstance(dibujo_base, ImageReader):
-                            c.drawImage(dibujo_base, x, y, width=w, height=h, mask='auto')
-                            
-                        # Si es un vector ligero normal
-                        elif dibujo_base:
-                            if color_tx:
-                                dibujo_svg = copy.deepcopy(dibujo_base)
-                                self._inyectar_color_svg(dibujo_svg, color_tx)
-                            else:
-                                dibujo_svg = dibujo_base
+                        # 1. Usamos el parser infalible que creamos para UI
+                        geometrias = self.extraer_geometria_cruda(contenido)
+                        if not geometrias: raise ValueError("SVG vacío o corrupto")
 
-                            escala_x = w / dibujo_svg.width
-                            escala_y = h / dibujo_svg.height
+                        from PyQt6.QtGui import QPainterPath
+                        from PyQt6.QtCore import Qt
+                        
+                        # 2. Calculamos la caja original del SVG para saber la escala
+                        bbox_global = QPainterPath()
+                        for geo in geometrias: bbox_global.addPath(geo['path'])
+                        caja_svg = bbox_global.boundingRect()
+                        
+                        if caja_svg.width() <= 0 or caja_svg.height() <= 0: raise ValueError("Caja matemática inválida")
+
+                        escala_x = w / caja_svg.width()
+                        escala_y = h / caja_svg.height()
+
+                        c.saveState()
+                        if opacidad < 1.0:
+                            c.setFillAlpha(opacidad)
+                            c.setStrokeAlpha(opacidad)
                             
-                            c.saveState()
-                            c.translate(x, y)
-                            c.scale(escala_x, escala_y)
-                            renderPDF.draw(dibujo_svg, c, 0, 0)
-                            c.restoreState()
+                        # 3. Alineamos el origen del PDF con el origen del SVG
+                        c.translate(x, y)
+                        c.scale(escala_x, escala_y)
+                        c.translate(-caja_svg.x(), -caja_svg.y())
+
+                        # 4. Dibujamos cada pieza traduciendo Qt a ReportLab
+                        for geo in geometrias:
+                            qpath = geo['path']
+                            brush = geo['brush']
+                            pen = geo['pen']
+
+                            fill_flag = 0
+                            stroke_flag = 0
+
+                            # --- A. Aplicar Relleno ---
+                            if brush.style() != Qt.BrushStyle.NoBrush:
+                                if color_tx: # Si el usuario inyectó un color desde tu panel
+                                    try: c.setFillColor(HexColor(color_tx))
+                                    except: pass
+                                else:
+                                    qc = brush.color()
+                                    c.setFillColorRGB(qc.redF(), qc.greenF(), qc.blueF(), qc.alphaF())
+                                fill_flag = 1
+
+                            # --- B. Aplicar Borde (Vital para el Láser) ---
+                            if pen.style() != Qt.PenStyle.NoPen:
+                                qc = pen.color()
+                                c.setStrokeColorRGB(qc.redF(), qc.greenF(), qc.blueF(), qc.alphaF())
+                                grosor_pen = pen.widthF()
+                                # Aseguramos que la línea súper fina de 0.05 se exporte tal cual
+                                c.setLineWidth(grosor_pen if grosor_pen > 0 else 0.1)
+                                stroke_flag = 1
+
+                            # --- C. Traducción de Curvas Matemáticas ---
+                            p = c.beginPath()
+                            i = 0
+                            while i < qpath.elementCount():
+                                el = qpath.elementAt(i)
+                                
+                                # 🚀 LA CURA PyQt6: Comparamos con las constantes de Enum directamente
+                                if el.type == QPainterPath.ElementType.MoveToElement:
+                                    p.moveTo(el.x, el.y)
+                                    i += 1
+                                elif el.type == QPainterPath.ElementType.LineToElement:
+                                    p.lineTo(el.x, el.y)
+                                    i += 1
+                                elif el.type == QPainterPath.ElementType.CurveToElement:
+                                    # Requiere 3 puntos en total (El actual + 2 anclajes)
+                                    if i + 2 < qpath.elementCount():
+                                        el2 = qpath.elementAt(i+1)
+                                        el3 = qpath.elementAt(i+2)
+                                        p.curveTo(el.x, el.y, el2.x, el2.y, el3.x, el3.y)
+                                    i += 3
+                                else:
+                                    # Ignoramos puntos de control sueltos (CurveToDataElement)
+                                    i += 1
+
+                            if fill_flag or stroke_flag:
+                                c.drawPath(p, fill=fill_flag, stroke=stroke_flag)
+
+                        c.restoreState()
+                        
                     except Exception as e:
-                        print(f"Error renderizando SVG: {e}")
+                        print(f"⚠️ Motor nativo SVG falló, activando Fallback Ultra-HD: {e}")
+                        # 🛡️ FALLBACK AUTOMÁTICO: Si algo se rompe, rasteriza el SVG a calidad imprenta (600 DPI)
+                        try:
+                            doc = fitz.open(contenido)
+                            pix = doc[0].get_pixmap(dpi=600, alpha=True)
+                            img_b = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
+                            img_reader = ImageReader(img_b)
+                            c.drawImage(img_reader, x, y, width=w, height=h, mask='auto')
+                        except Exception as ex:
+                            print(f"Error fatal estampando SVG en PDF: {ex}")
                         
                 # 🚀 LA CURA: ¡Faltaba el bloque para dibujar las imágenes normales (PNG/JPG)!
                 else:
