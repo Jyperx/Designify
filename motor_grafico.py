@@ -222,7 +222,7 @@ class RectorOP:
         self.ruta_plantilla = None
         self.w_pdf = ancho_pts
         self.h_pdf = alto_pts
-        self.elementos = {}
+        self.elementos = {} 
         self.limpiar_cache_imagenes()
 
     def cargar_plantilla(self, ruta_pdf):
