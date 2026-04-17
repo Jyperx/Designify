@@ -2,7 +2,7 @@ import io
 import os
 import json
 import base64
-import fitz  # PyMuPDF
+import fitz
 import copy
 import math
 import tempfile
