@@ -1267,14 +1267,14 @@ class RectorOP:
                 
                 if contenido.lower().endswith('.svg'):
                     # =======================================================
-                    # 🚀 EL PUENTE SUPREMO CORREGIDO: SIN GIROS NI ERRORES
+                    # 🚀 EL PUENTE SUPREMO: COREL-DRAW COMPATIBLE (BAKED)
                     # =======================================================
                     try:
                         geometrias = self.extraer_geometria_cruda(contenido)
                         if not geometrias: raise ValueError("SVG vacío")
 
-                        from PyQt6.QtGui import QPainterPath
-                        from PyQt6.QtCore import Qt
+                        from PyQt6.QtGui import QPainterPath, QTransform
+                        from PyQt6.QtCore import Qt, QPointF
                         
                         bbox_global = QPainterPath()
                         for geo in geometrias: bbox_global.addPath(geo['path'])
@@ -1285,24 +1285,27 @@ class RectorOP:
                         escala_x = w / caja_svg.width()
                         escala_y = h / caja_svg.height()
 
-                        c.saveState()
-                        
-                        # --- 🚀 PASO 1: CORRECCIÓN DE VOLTEO VERTICAL ---
-                        # Movemos el origen a la parte superior del objeto y volteamos el eje Y
-                        c.translate(x, y + h) 
-                        c.scale(1, -1)
-                        
-                        # Aplicamos la escala del SVG y alineamos con su caja interna
-                        c.scale(escala_x, escala_y)
-                        c.translate(-caja_svg.x(), -caja_svg.y())
+                        # 🚀 LA MAGIA: Creamos una matriz que deforma las matemáticas nativamente
+                        transform = QTransform()
+                        transform.translate(x, y + h) 
+                        transform.scale(1, -1) # Inversión del Eje Y
+                        transform.scale(escala_x, escala_y)
+                        transform.translate(-caja_svg.x(), -caja_svg.y())
 
-                        # 4. Dibujamos cada pieza traduciendo Qt a ReportLab
+                        c.saveState()
+                        if opacidad < 1.0:
+                            c.setFillAlpha(opacidad)
+                            c.setStrokeAlpha(opacidad)
+
                         for geo in geometrias:
-                            qpath = geo['path']
+                            # 1. HORNEAMOS LA RUTA: El vector original muta a su posición y tamaño final absoluto
+                            qpath_orig = geo['path']
+                            qpath = transform.map(qpath_orig) 
+                            
                             brush = geo['brush']
                             pen = geo['pen']
 
-                            # --- 📐 PASO A: CONSTRUIR EL TRAZO MATEMÁTICO ---
+                            # --- 📐 CONSTRUCCIÓN ABSOLUTA DEL TRAZO ---
                             p = c.beginPath()
                             i = 0
                             while i < qpath.elementCount():
@@ -1322,87 +1325,103 @@ class RectorOP:
                                 else:
                                     i += 1
 
-                            # --- 🎨 PASO B: APLICAR COLOR, BORDES Y DEGRADADOS NATIVOS ---
                             fill_flag, stroke_flag = 0, 0
                             
-                            # Preparar el borde (si existe)
+                            # --- BORDES (Escalados matemáticamente) ---
                             if pen.style() != Qt.PenStyle.NoPen:
                                 qc = pen.color()
                                 c.setStrokeColorRGB(qc.redF(), qc.greenF(), qc.blueF())
                                 c.setStrokeAlpha(qc.alphaF() * opacidad)
-                                c.setLineWidth(pen.widthF())
+                                # Como horneamos la escala, el grosor de la línea debe crecer proporcionalmente
+                                grosor = pen.widthF() * ((escala_x + escala_y) / 2.0)
+                                c.setLineWidth(grosor if grosor > 0 else 0.1)
                                 stroke_flag = 1
                             
-                            # Evaluar el tipo de relleno
+                            # --- RELLENO SÓLIDO ---
                             if brush.style() == Qt.BrushStyle.SolidPattern:
-                                # Relleno Sólido Normal
                                 qc = brush.color()
                                 c.setFillColorRGB(qc.redF(), qc.greenF(), qc.blueF())
                                 c.setFillAlpha(qc.alphaF() * opacidad)
                                 c.drawPath(p, fill=1, stroke=stroke_flag)
                                 
+                            # --- RELLENO DEGRADADO (COREL SAFE) ---
                             elif brush.style() in [Qt.BrushStyle.LinearGradientPattern, Qt.BrushStyle.RadialGradientPattern]:
-                                # 🚀 LA CURA DE LOS DEGRADADOS: Dibujo Dinámico
                                 grad = brush.gradient()
                                 try:
-                                    # Extraer los colores y opacidades exactas del degradado
                                     paradas = grad.stops()
                                     colores_grad = []
+                                    pos_grad = []
                                     from reportlab.lib.colors import Color
                                     from PyQt6.QtGui import QGradient
-                                    for pos, qc in paradas:
-                                        # Mapeamos los colores de Qt a ReportLab (incluyendo el Alpha)
-                                        colores_grad.append(Color(qc.redF(), qc.greenF(), qc.blueF(), alpha=qc.alphaF() * opacidad))
+                                    import math
                                     
-                                    # Magia de ReportLab: Usar el trazo como "Máscara de Recorte"
+                                    for pos, qc in paradas:
+                                        # Le inyectamos los topes de color exactos del SVG
+                                        colores_grad.append(Color(qc.redF(), qc.greenF(), qc.blueF(), alpha=qc.alphaF() * opacidad))
+                                        pos_grad.append(pos)
+                                    
                                     c.saveState()
+                                    # Cuchilla de Recorte: El degradado no se saldrá de los bordes
                                     c.clipPath(p, stroke=0, fill=0)
                                     
-                                    caja_path = qpath.boundingRect()
-                                    px, py = caja_path.x(), caja_path.y()
-                                    pw, ph = caja_path.width(), caja_path.height()
+                                    # Extraemos el BoundingBox original
+                                    caja_orig = qpath_orig.boundingRect()
+                                    px, py = caja_orig.x(), caja_orig.y()
+                                    pw, ph = caja_orig.width(), caja_orig.height()
                                     
+                                    es_relativo = grad.coordinateMode() == QGradient.CoordinateMode.ObjectBoundingMode
+                                    
+                                    # 🚀 SEPARADOR DE TIPOS DE DEGRADADO
                                     if grad.type() == QGradient.Type.LinearGradient:
-                                        # Si el parser usó ObjectBoundingMode (0.0 a 1.0), los escalamos al tamaño real
-                                        es_relativo = grad.coordinateMode() == QGradient.CoordinateMode.ObjectBoundingMode
-                                        x0_abs = px + (grad.start().x() * pw) if es_relativo else grad.start().x()
-                                        y0_abs = py + (grad.start().y() * ph) if es_relativo else grad.start().y()
-                                        x1_abs = px + (grad.finalStop().x() * pw) if es_relativo else grad.finalStop().x()
-                                        y1_abs = py + (grad.finalStop().y() * ph) if es_relativo else grad.finalStop().y()
+                                        x0_orig = px + (grad.start().x() * pw) if es_relativo else grad.start().x()
+                                        y0_orig = py + (grad.start().y() * ph) if es_relativo else grad.start().y()
+                                        x1_orig = px + (grad.finalStop().x() * pw) if es_relativo else grad.finalStop().x()
+                                        y1_orig = py + (grad.finalStop().y() * ph) if es_relativo else grad.finalStop().y()
                                         
-                                        c.linearGradient(x0_abs, y0_abs, x1_abs, y1_abs, colores_grad)
-                                    else:
-                                        # Si es Radial u otro tipo complejo, trazamos un lineal en diagonal como respaldo seguro
-                                        c.linearGradient(px, py, px + pw, py + ph, colores_grad)
+                                        # Horneamos las coordenadas
+                                        pt0 = transform.map(QPointF(x0_orig, y0_orig))
+                                        pt1 = transform.map(QPointF(x1_orig, y1_orig))
                                         
+                                        c.linearGradient(pt0.x(), pt0.y(), pt1.x(), pt1.y(), colors=colores_grad, positions=pos_grad)
+                                        
+                                    elif grad.type() == QGradient.Type.RadialGradient:
+                                        cx_orig = px + (grad.center().x() * pw) if es_relativo else grad.center().x()
+                                        cy_orig = py + (grad.center().y() * ph) if es_relativo else grad.center().y()
+                                        r_orig = (grad.radius() * max(pw, ph)) if es_relativo else grad.radius()
+                                        
+                                        # Horneamos el centro
+                                        ptC = transform.map(QPointF(cx_orig, cy_orig))
+                                        
+                                        # Horneamos el radio calculando la distancia a un punto en el borde
+                                        ptR = transform.map(QPointF(cx_orig + r_orig, cy_orig))
+                                        r_horneado = math.hypot(ptR.x() - ptC.x(), ptR.y() - ptC.y())
+                                        
+                                        try:
+                                            # Intentamos usar el Radial nativo de ReportLab
+                                            c.radialGradient(ptC.x(), ptC.y(), r_horneado, colors=colores_grad, positions=pos_grad)
+                                        except AttributeError:
+                                            # FALLBACK COREL SEGURO: Si la versión de ReportLab no soporta radiales
+                                            # Trazamos un lineal en diagonal que imita la profundidad
+                                            pt0 = transform.map(QPointF(px, py))
+                                            pt1 = transform.map(QPointF(px + pw, py + ph))
+                                            c.linearGradient(pt0.x(), pt0.y(), pt1.x(), pt1.y(), colors=colores_grad, positions=pos_grad)
+
                                     c.restoreState()
                                     
-                                    # Finalmente, si la pieza tenía borde, lo pintamos por encima de la máscara
+                                    # Dibujamos el borde encima del degradado si lo tiene
                                     if stroke_flag:
                                         c.drawPath(p, fill=0, stroke=1)
                                         
                                 except Exception as e:
-                                    print(f"Error procesando degradado nativo: {e}")
-                                    # Si el degradado falla matemáticamente, rellenamos con color plano para no dejar huecos
+                                    print(f"Error en degradado nativo: {e}")
                                     c.setFillColorRGB(0.8, 0.8, 0.8)
                                     c.drawPath(p, fill=1, stroke=stroke_flag)
                             else:
-                                # Figura hueca (Solo borde)
-                                if stroke_flag:
-                                    c.drawPath(p, fill=0, stroke=1)
-                        
+                                if stroke_flag: c.drawPath(p, fill=0, stroke=1)
+
+                        c.restoreState()
                     except Exception as e:
                         print(f"⚠️ Fallback activado por: {e}")
-                        # Mantener el código de fallback de imagen 600dpi por seguridad...
-                        # 🛡️ FALLBACK AUTOMÁTICO: Si algo se rompe, rasteriza el SVG a calidad imprenta (600 DPI)
-                        try:
-                            doc = fitz.open(contenido)
-                            pix = doc[0].get_pixmap(dpi=600, alpha=True)
-                            img_b = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
-                            img_reader = ImageReader(img_b)
-                            c.drawImage(img_reader, x, y, width=w, height=h, mask='auto')
-                        except Exception as ex:
-                            print(f"Error fatal estampando SVG en PDF: {ex}")
                         
                 # 🚀 LA CURA: ¡Faltaba el bloque para dibujar las imágenes normales (PNG/JPG)!
                 else:
