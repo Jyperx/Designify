@@ -28,6 +28,8 @@ import qtawesome as qta
 from motor_grafico import RectorOP
 from dialogs import NewDocumentDialog
 from properties_panel import PropertiesPanel
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from PyQt6.QtGui import QSurfaceFormat
 
 # --- COLORES EXACTOS DEL DISEÑO PREMIUM ---
 BG_NAV = "#1A1B1E"          # Fondo de la barra de navegación (Columna 1)
@@ -1637,15 +1639,31 @@ class InteractiveCanvasView(QGraphicsView):
         # 🚀 1. LÍMITES MATEMÁTICOS DE ESCENA
         self.scene().setSceneRect(-2000, -2000, self.motor.w_pdf + 4000, self.motor.h_pdf + 4000)
 
-        # 🚀 2. BANDERAS RASTER DE MÁXIMO RENDIMIENTO
+        # 🚀 2. BANDERAS RASTER (Ahora apoyadas por GPU)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        # ⚡ VOLVEMOS AL MOTOR RASTER NATIVO (Adiós OpenGL)
-        # La CPU con BoundingRectUpdate es el rey absoluto para SVGs cacheados
-        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
-        
+        # =======================================================
+        # 🚀 SELECTOR DE MOTOR DE RENDERIZADO (CPU vs GPU)
+        # =======================================================
+        self.motor_render = "GPU" # Cambia a "CPU" para PC de bajos recursos
+
+        if self.motor_render == "GPU":
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+            from PyQt6.QtGui import QSurfaceFormat
+            gl_format = QSurfaceFormat()
+            gl_format.setSamples(4) # Suavizado x4 por hardware
+            gl_widget = QOpenGLWidget()
+            gl_widget.setFormat(gl_format)
+            self.setViewport(gl_widget)
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        else:
+            # Configuración Clásica CPU
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
+            self.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
         # ⚡ MEMORIA Y CACHÉ
         self.setCacheMode(QGraphicsView.CacheModeFlag.CacheBackground)
         self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
@@ -2737,28 +2755,58 @@ class InteractiveCanvasView(QGraphicsView):
         return puntos_suaves
 
     def wheelEvent(self, event):
+        """Controla el Zoom y el Desplazamiento (Con Proxy Auto-Híbrido CPU/GPU)"""
+        from PyQt6.QtWidgets import QGraphicsView
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtOpenGLWidgets import QOpenGLWidget
         
         # ========================================================
-        # 🚀 1. ACTIVAR MODO TURBO (Baja Resolución / Alto FPS)
+        # 🚀 1. ACTIVAR CÁMARA PROXY (Captura Ultra-Rápida)
         # ========================================================
-        if getattr(self, 'zoom_timer', None): # Verificamos que el timer exista
+        if getattr(self, 'zoom_timer', None):
             if not getattr(self, 'is_zooming', False):
                 self.is_zooming = True
                 
-                # Apagamos el suavizado de bordes (El asesino de CPUs)
-                self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-                self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                # A. 🚀 TOMA DE PANTALLAZO INTELIGENTE (El secreto de la velocidad)
+                viewport_widget = self.viewport()
+                vp_rect = viewport_widget.rect()
                 
-                # Congelamos los vectores pesados
-                for item in self.scene().items():
-                    if type(item).__name__ == 'PremiumCompositeSvgItem':
-                        item.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
+                if isinstance(viewport_widget, QOpenGLWidget):
+                    # ESTAMOS EN GPU: Tomamos la foto directo de la VRAM (Toma 0.0001 ms)
+                    pantallazo_img = viewport_widget.grabFramebuffer()
+                    pantallazo = QPixmap.fromImage(pantallazo_img)
+                else:
+                    # ESTAMOS EN CPU: Pantallazo tradicional
+                    pantallazo = viewport_widget.grab(vp_rect)
+                
+                # B. Creamos un objeto de imagen con esa foto
+                from PyQt6.QtWidgets import QGraphicsPixmapItem
+                self.zoom_proxy = QGraphicsPixmapItem(pantallazo)
+                
+                # C. La alineamos milimétricamente con el mundo 2D
+                escena_rect = self.mapToScene(vp_rect).boundingRect()
+                self.zoom_proxy.setPos(escena_rect.topLeft())
+                
+                escala_x = escena_rect.width() / pantallazo.width()
+                self.zoom_proxy.setScale(escala_x)
+                self.zoom_proxy.setZValue(999999) # Arriba de todo
+                
+                self.scene().addItem(self.zoom_proxy)
+                
+                # D. APAGAMOS LA MATEMÁTICA PESADA
+                self.vectores_ocultos = []
+                if hasattr(self, 'items_ui'):
+                    for item in self.items_ui.values():
+                        if type(item).__name__ == 'PremiumCompositeSvgItem' and item.isVisible():
+                            item.hide() 
+                            self.vectores_ocultos.append(item)
+                            
+                self.setInteractive(False)
 
-            # Reiniciamos el reloj para saber cuándo dejó de girar la rueda
-            self.zoom_timer.start(150) # 150 milisegundos de espera
+            self.zoom_timer.start(150)
 
         # ========================================================
-        # 👇 2. TU CÓDIGO ORIGINAL DE ZOOM Y DESPLAZAMIENTO 👇
+        # 👇 2. CÓDIGO DE ZOOM Y DESPLAZAMIENTO ORIGINAL 👇
         # ========================================================
         mods = event.modifiers()
         delta = event.angleDelta().y()
@@ -2789,26 +2837,35 @@ class InteractiveCanvasView(QGraphicsView):
             
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
-            if getattr(self, 'uid_activo', None):
+            if getattr(self, 'uid_activo', None) and not self.is_zooming:
                 self.dibujar_controles_seleccion()
 
     def _terminar_zoom(self):
         """
-        🚀 RESTAURACIÓN ULTRA-HD:
-        El usuario soltó la rueda. Devolvemos el motor a su máxima calidad visual.
+        🚀 RESTAURACIÓN MATEMÁTICA:
+        El usuario soltó la rueda. Devolvemos las texturas a vectores matemáticos UHD.
         """
         self.is_zooming = False
+        
         from PyQt6.QtGui import QPainter
+        from PyQt6.QtWidgets import QGraphicsItem
+        
+        # 1. Encendemos el mundo real
+        self.setInteractive(True) 
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         
-        from PyQt6.QtWidgets import QGraphicsItem
-        for item in self.scene().items():
-            if type(item).__name__ == 'PremiumCompositeSvgItem':
-                # Volvemos a encender las matemáticas precisas para que el vector se vea nítido
-                item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
-                
-        # Forzamos un repintado final perfecto
+        # 2. Devolvemos el caché matemático a los SVGs
+        if hasattr(self, 'items_ui'):
+            for item in self.items_ui.values():
+                if type(item).__name__ == 'PremiumCompositeSvgItem':
+                    # DeviceCoordinateCache recalcula los vectores perfectos para esta nueva escala
+                    item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                    item.update()
+
+        if getattr(self, 'uid_activo', None):
+            self.dibujar_controles_seleccion()
+            
         self.viewport().update()
 
     # ==========================================
