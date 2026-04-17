@@ -951,173 +951,178 @@ class AssetsPanel(QFrame):
             return
             
         scroll_pos = self.tree_widget.verticalScrollBar().value()
-        
-        # 🚀 QUITAMOS EL SET UPDATES FALSE QUE CRASHEABA LOS GRUPOS NUEVOS
         self.tree_widget.blockSignals(True)
         
+        # =======================================================
+        # 🚀 FASE 1: LIMPIEZA DE HUÉRFANOS
+        # =======================================================
         uids_motor = [u for u, e in self.motor.elementos.items() if e.get('tipo') != 'Ignorar']
-        
-        # 1. ESCUDO ANTI-SEGFAULT (Sincronización de punteros vivos)
-        nuevos_items = {}
-        iterator = QTreeWidgetItemIterator(self.tree_widget)
-        while iterator.value():
-            it = iterator.value()
-            try:
-                uid = it.data(0, Qt.ItemDataRole.UserRole)
-                if uid: nuevos_items[uid] = it
-            except RuntimeError: pass 
-            iterator += 1
-        self.list_items_ui = nuevos_items
-        
-        # 2. VIRTUAL DOM: Matar lo inexistente
         uids_a_borrar = [u for u in self.list_items_ui if u not in uids_motor]
+        
         for uid in uids_a_borrar:
             item = self.list_items_ui.pop(uid)
-            self.tarjetas_ui.pop(uid, None)
-            try:
-                parent = item.parent()
-                if parent: parent.removeChild(item)
-                else: 
-                    idx = self.tree_widget.indexOfTopLevelItem(item)
-                    if idx >= 0: self.tree_widget.takeTopLevelItem(idx)
-            except RuntimeError: pass
-                
-        # 3. VIRTUAL DOM: Procesar de arriba abajo
-        raices = [uid for uid in uids_motor if not self.motor.elementos[uid].get('parent_marco')]
-        for uid in raices:
-            self._procesar_nodo_vdom(uid, self.tree_widget)
+            card = self.tarjetas_ui.pop(uid, None)
             
+            if card: 
+                try: card.deleteLater() # 🚀 Añadido el try aquí también por si acaso
+                except RuntimeError: pass 
+            
+            padre = item.parent()
+            if padre: padre.removeChild(item)
+            else:
+                idx = self.tree_widget.indexOfTopLevelItem(item)
+                if idx >= 0: self.tree_widget.takeTopLevelItem(idx)
+
+        # =======================================================
+        # 🚀 FASE 2: RECONCILIACIÓN ESTRUCTURAL (El DOM Invisible)
+        # =======================================================
+        for uid in uids_motor:
+            elem = self.motor.elementos[uid]
+            parent_uid = elem.get('parent_marco')
+            
+            # 1. Crear el esqueleto si no existe
+            if uid not in self.list_items_ui:
+                item = QTreeWidgetItem()
+                item.setData(0, Qt.ItemDataRole.UserRole, uid)
+                item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+                self.list_items_ui[uid] = item
+            else:
+                item = self.list_items_ui[uid]
+                
+            item.setData(1, Qt.ItemDataRole.DisplayRole, int(elem.get('z_index', 0)))
+            
+            # 2. 🚀 LA CURA DEL BUG: ¿Dónde vive el ítem realmente en Qt?
+            padre_deseado = self.list_items_ui.get(parent_uid) if parent_uid else self.tree_widget
+            
+            if item.parent(): 
+                padre_actual = item.parent()
+            elif item.treeWidget(): 
+                padre_actual = item.treeWidget()
+            else: 
+                padre_actual = None # ¡Es nuevo y está flotando en RAM!
+            
+            # Si no está donde debería, lo movemos
+            if padre_actual != padre_deseado:
+                # A. Lo arrancamos de su padre anterior (si tenía)
+                if padre_actual is not None:
+                    if isinstance(padre_actual, QTreeWidget):
+                        idx = padre_actual.indexOfTopLevelItem(item)
+                        if idx >= 0: padre_actual.takeTopLevelItem(idx)
+                    else:
+                        padre_actual.removeChild(item)
+                    
+                # B. Lo insertamos en su nuevo hogar
+                if isinstance(padre_deseado, QTreeWidget): 
+                    padre_deseado.addTopLevelItem(item)
+                else: 
+                    padre_deseado.addChild(item)
+
+        # =======================================================
+        # 🚀 FASE 3: RENDERIZADO VIRTUAL VDOM
+        # =======================================================
+        self._renderizar_rama(self.tree_widget.invisibleRootItem(), esta_visible=True)
+
         # 4. Ordenar visualmente
         self.tree_widget.sortByColumn(1, Qt.SortOrder.DescendingOrder)
         self.tree_widget.setSortingEnabled(False) 
-        
         self.tree_widget.blockSignals(False)
         self.tree_widget.verticalScrollBar().setValue(scroll_pos)
 
-    def _procesar_nodo_vdom(self, uid, parent_obj, padre_expandido=True):
-        from PyQt6.QtWidgets import QApplication
-        
-        elem = self.motor.elementos.get(uid)
-        if not elem: return
 
-        reubicado = False 
+    def _renderizar_rama(self, padre_item, esta_visible):
+        """El Renderizador Estilo React: Baja por el árbol vistiendo o desnudando nodos"""
+        from PyQt6.QtCore import QSize # Por si acaso falta el import local
 
-        if uid in self.list_items_ui:
-            item = self.list_items_ui[uid]
-            padre_actual = item.parent() if item.parent() else item.treeWidget()
-            if padre_actual != parent_obj:
-                try:
-                    self.tree_widget.removeItemWidget(item, 0)
-                    if item.parent(): item.parent().removeChild(item)
-                    else:
-                        idx = self.tree_widget.indexOfTopLevelItem(item)
-                        if idx >= 0: self.tree_widget.takeTopLevelItem(idx)
+        for i in range(padre_item.childCount()):
+            item = padre_item.child(i)
+            uid = item.data(0, Qt.ItemDataRole.UserRole)
+            elem = self.motor.elementos.get(uid)
+            if not elem: continue
+            
+            es_carpeta = item.childCount() > 0 or elem.get('tipo') == 'Marco'
+            
+            if esta_visible:
+                card = self.tarjetas_ui.get(uid)
+                
+                # =========================================================
+                # 🚀 ESCUDO ANTI-RUNTIME ERROR: Verificación de vida C++
+                # =========================================================
+                cxx_vivo = False
+                if card:
+                    try:
+                        # Le damos un pequeño "toque" a la propiedad de texto
+                        # Si Qt destruyó el objeto en C++ (ej. al reordenar), esto lanzará RuntimeError
+                        _ = card.name_edit.text()
+                        
+                        # También confirmamos que siga anclado visualmente al árbol
+                        if self.tree_widget.itemWidget(item, 0) is not None:
+                            cxx_vivo = True
+                    except RuntimeError:
+                        pass # El recolector de basura de C++ lo destruyó, cxx_vivo sigue False
+                
+                if not cxx_vivo:
+                    # NACE LA TARJETA (O renace si Qt la destruyó)
+                    card = LayerCard(uid, elem, self.mapa_fuentes, self.motor, parent=self.tree_widget)
+                    item.setSizeHint(0, card.sizeHint())
+                    self.tree_widget.setItemWidget(item, 0, card)
+                    self.tarjetas_ui[uid] = card
                     
-                    if isinstance(parent_obj, QTreeWidget): parent_obj.addTopLevelItem(item)
-                    else: parent_obj.addChild(item)
-                    reubicado = True 
-                except RuntimeError: pass
-        else:
-            item = QTreeWidgetItem()
-            item.setData(0, Qt.ItemDataRole.UserRole, uid)
-            if isinstance(parent_obj, QTreeWidget): parent_obj.addTopLevelItem(item)
-            else: parent_obj.addChild(item)
-            self.list_items_ui[uid] = item
-            reubicado = True
-
-        item.setData(1, Qt.ItemDataRole.DisplayRole, int(elem.get('z_index', 0)))
-        flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled
-        item.setFlags(flags)
-
-        card = self.tarjetas_ui.get(uid)
-        
-        # ==========================================
-        # 🚀 LA CURA EXTREMA: VIRTUAL DOM PEREZOSO
-        # ==========================================
-        if padre_expandido:
-            # MODO ACTIVO: El nodo es visible. Creamos o actualizamos su Tarjeta UI.
-            cxx_vivo = False
-            if card and not reubicado:
-                try:
-                    _ = card.name_edit.text() 
-                    if self.tree_widget.itemWidget(item, 0) is None: cxx_vivo = False
-                    else: cxx_vivo = True
-                except RuntimeError: cxx_vivo = False
-
-            if cxx_vivo:
-                nuevo_nombre = elem.get('nombre') or elem.get('nombre_capa') or str(elem.get('contenido', '')).replace('\n', ' ')
-                if card.name_edit.text() != nuevo_nombre: card.name_edit.setText(nuevo_nombre)
-                if card.oculto != elem.get('oculto', False):
-                    card.oculto = elem.get('oculto', False)
-                    card._update_eye_icon()
-                if card.bloqueado != elem.get('bloqueado', False):
-                    card.bloqueado = elem.get('bloqueado', False)
-                    card._update_lock_icon()
+                    # Conectamos las señales centrales de la app
+                    main_studio = self.window()
+                    if main_studio and hasattr(main_studio, 'seleccionar_desde_capas'):
+                        card.seleccionada.connect(main_studio.seleccionar_desde_capas)
+                        card.oculto_cambiado.connect(main_studio._al_cambiar_oculto_capa)
+                        card.bloqueado_cambiado.connect(main_studio._al_cambiar_bloqueado_capa)
+                        card.nombre_cambiado.connect(main_studio._al_cambiar_nombre_capa)
+                        
+                    if es_carpeta:
+                        card.toggled_folder.connect(lambda abierto, it=item: self._al_alternar_carpeta(it, abierto))
+                else:
+                    # SOLO ACTUALIZAR DATOS (Mutación VDOM veloz)
+                    nuevo_nombre = elem.get('nombre') or elem.get('nombre_capa') or str(elem.get('contenido', '')).replace('\n', ' ')
+                    if card.name_edit.text() != nuevo_nombre: card.name_edit.setText(nuevo_nombre)
+                    if card.oculto != elem.get('oculto', False):
+                        card.oculto = elem.get('oculto', False)
+                        card._update_eye_icon()
+                    if card.bloqueado != elem.get('bloqueado', False):
+                        card.bloqueado = elem.get('bloqueado', False)
+                        card._update_lock_icon()
+                        
+                # Ajustes de carpeta (Por si metieron un elemento y ahora es padre)
+                card.hacer_carpeta(es_carpeta)
+                if es_carpeta:
+                    card._folder_open = item.isExpanded()
+                    icon = 'fa5s.chevron-down' if card._folder_open else 'fa5s.chevron-right'
+                    card.btn_folder.setIcon(get_cached_icon(icon, TEXT_MAIN, 10, as_icon=True))
             else:
-                card = LayerCard(uid, elem, self.mapa_fuentes, self.motor, parent=None) 
-                item.setSizeHint(0, card.sizeHint())
-                self.tree_widget.setItemWidget(item, 0, card)
-                self.tarjetas_ui[uid] = card
+                # 🚀 MODO GHOST: El padre está cerrado. Destruimos la UI de este hijo sin piedad.
+                card = self.tarjetas_ui.pop(uid, None)
+                if card:
+                    self.tree_widget.removeItemWidget(item, 0)
+                    try: 
+                        card.deleteLater()
+                    except RuntimeError: 
+                        pass # Si ya estaba muerto, lo ignoramos
+                        
+                # Le dejamos una altura mínima fantasma para que no rompa la barra de Scroll
+                item.setSizeHint(0, QSize(200, 46))
                 
-                main_studio = self.window()
-                if main_studio and hasattr(main_studio, 'seleccionar_desde_capas'):
-                    card.seleccionada.connect(main_studio.seleccionar_desde_capas)
-                    card.oculto_cambiado.connect(main_studio._al_cambiar_oculto_capa)
-                    card.bloqueado_cambiado.connect(main_studio._al_cambiar_bloqueado_capa)
-                    card.nombre_cambiado.connect(main_studio._al_cambiar_nombre_capa)
-        else:
-            # 🚀 MODO GHOST: La carpeta padre está cerrada. NO CREAMOS LA UI.
-            # El procesador descansa. Solo le indicamos a Qt cuánto mediría la tarjeta
-            # (aprox 46px) para que la barra de desplazamiento (Scroll) no se rompa.
-            item.setSizeHint(0, QSize(200, 46))
-            if card:
-                # Si existía (porque la carpeta antes estaba abierta), la destruimos
-                # para liberar memoria RAM.
-                self.tree_widget.removeItemWidget(item, 0)
-                card.deleteLater()
-                del self.tarjetas_ui[uid]
-                card = None
+            # Propagación Recursiva: Solo renderizamos los hijos si este padre está visible Y expandido
+            hijos_visibles = esta_visible and item.isExpanded()
+            self._renderizar_rama(item, hijos_visibles)
 
-        # ==========================================
-        # 🚀 LÓGICA DE CARPETAS Y CARGA EN RÁFAGAS
-        # ==========================================
-        hijos = [h_uid for h_uid, h_elem in self.motor.elementos.items() if h_elem.get('parent_marco') == uid]
+
+    def _al_alternar_carpeta(self, item, abierto):
+        """Intercepta el clic en la flechita de la carpeta de forma limpia (Sin redibujar todo)"""
+        item.setExpanded(abierto)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         
-        if hijos:
-            if card and hasattr(card, 'hacer_carpeta'):
-                card.hacer_carpeta(True)
-                try: card.toggled_folder.disconnect()
-                except: pass
-                
-                # 🚀 EL BATCH RENDERER: Interceptamos el clic en la carpeta
-                def al_alternar(abierto, it=item, hs=hijos):
-                    it.setExpanded(abierto)
-                    if abierto:
-                        # Mostramos el cursor de carga
-                        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                        for i, h_uid in enumerate(hs):
-                            # Al abrirse, forzamos a sus hijos a crear su interfaz visual
-                            self._procesar_nodo_vdom(h_uid, it, padre_expandido=True)
-                            
-                            # 🚀 MAGIA: Cada 15 capas renderizadas, hacemos una pausa de 0.001s 
-                            # para que Qt redibuje la pantalla. ¡Adiós al "Programa no responde"!
-                            if i % 15 == 0: QApplication.processEvents()
-                            
-                        QApplication.restoreOverrideCursor()
-                    else:
-                        # Si el usuario cierra la carpeta, destruimos las tarjetas hijas para vaciar RAM
-                        for h_uid in hs:
-                            self._procesar_nodo_vdom(h_uid, it, padre_expandido=False)
-                            
-                card.toggled_folder.connect(al_alternar)
-                
-            es_abierta = item.isExpanded()
-            for h_uid in hijos:
-                # Solo autorizamos la creación de UI en hijos si NOSOTROS estamos visibles y abiertos
-                self._procesar_nodo_vdom(h_uid, item, padre_expandido=(padre_expandido and es_abierta))
-        else:
-            if card and hasattr(card, 'hacer_carpeta'):
-                card.hacer_carpeta(False)
+        # 🚀 O(1) ACTUALIZACIÓN PARCIAL:
+        # En vez de reconstruir el panel completo, solo le decimos al motor 
+        # que re-evalúe la visibilidad de los hijos de esta carpeta exacta.
+        self._renderizar_rama(item, esta_visible=abierto)
+        
+        QApplication.restoreOverrideCursor()
 
 
     def get_list_items(self):
